@@ -1,3 +1,5 @@
+use bustubrust::bpm::DiskManager;
+
 fn main() {
-    println!("Hello, world!");
+    let b = DiskManager::new("somefile.db".to_string(), 10);
 }
