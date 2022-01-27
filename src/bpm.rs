@@ -11,7 +11,7 @@ use std::sync::MutexGuard;
 use std::{
     fs::{File, OpenOptions},
     hash::Hasher,
-    io::{empty, Error, Read, Seek, SeekFrom, Write},
+    io::{copy, empty, Error, Read, Seek, SeekFrom, Write},
 };
 
 struct BufferPool<R: Replacer> {
@@ -130,6 +130,7 @@ where
                 &mut locked_chosen_frame.raw_data[..],
             )?;
         }
+
         locked_chosen_frame.assign_new(new_page_id)?;
         locked_chosen_frame.pin();
         drop(locked_chosen_frame);
@@ -137,6 +138,21 @@ where
     }
 
     fn _check_page_available_in_buffer(
+        b: &MutexGuard<BufferPool<R>>,
+        page_id: PageID,
+    ) -> Option<FrameID> {
+        let page_table = &b.page_table.borrow();
+
+        let maybe_frame = page_table.get(&page_id);
+        match maybe_frame {
+            Some(frame_id) => {
+                Some(*frame_id)
+            }
+            None => None,
+        }
+    }
+
+    fn _check_and_get_page_available_in_buffer(
         b: &MutexGuard<BufferPool<R>>,
         page_id: PageID,
     ) -> Result<Option<Arc<Mutex<Frame>>>, StrErr> {
@@ -172,7 +188,9 @@ where
         } else {
             match b.replacer.victim() {
                 Some(frame_id) => return Ok((frame_id, true)),
-                None => return Err(StrErr::new("oom")),
+                None => {
+                    return Err(StrErr::new("oom"));
+                }
             };
             /* let maybe_frame = b.replacer.victim();
             match ma
@@ -188,7 +206,7 @@ where
         page_id: PageID,
     ) -> Result<Arc<Mutex<Frame>>, StrErr> {
         let b = mu.lock().unwrap();
-        match Self::_check_page_available_in_buffer(&b, page_id)? {
+        match Self::_check_and_get_page_available_in_buffer(&b, page_id)? {
             Some(frame) => return Ok(frame),
             None => {}
         };
@@ -216,28 +234,49 @@ where
         Ok(chosen_frame)
     }
 
+    fn unpin_page(mu: &Mutex<BufferPool<R>>, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
+        let b = mu.lock().unwrap();
+        match Self::_check_page_available_in_buffer(&b, page_id) {
+            Some(frame_id) => {
+                let frame = Self::fetch_frame(&b, frame_id)?;
+                let mut locked_frame = frame.lock().unwrap();
+                locked_frame.pin_count -= 1;
+                locked_frame.dirty = dirty;
+                println!("unppining: {}", locked_frame.pin_count);
+                if locked_frame.pin_count == 0 {
+                    b.replacer.borrow().unpin(frame_id);
+                }
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
     fn flush_page(
-        mu: Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool<R>>,
         page_id: PageID,
         dm: &DiskManager,
     ) -> Result<(), StrErr> {
         let b = mu.lock().unwrap();
-        match Self::_check_page_available_in_buffer(&b, page_id)? {
-            Some(frame) => {
+        match Self::_check_page_available_in_buffer(&b, page_id) {
+            Some(frame_id) => {
+                let frame = Self::fetch_frame(&b, frame_id)?;
                 drop(b);
                 dm.write_from_frame_to_file(page_id, &mut frame.lock().unwrap().raw_data[..])?;
             }
-            None => {}
-        };
+            None => {},
+        }
         Ok(())
     }
 }
+const EMPTY_PAGE: [u8; PAGE_SIZE] = [0u8; PAGE_SIZE];
 
 impl Frame {
     fn assign_new(&mut self, new_page_id: PageID) -> Result<(), StrErr> {
         self.page_id = new_page_id;
         self.dirty = false;
-        empty().read_exact(&mut self.raw_data[..])?;
+
+        copy(&mut &EMPTY_PAGE[..], &mut &mut self.raw_data[..])?;
         Ok(())
     }
 
@@ -336,7 +375,6 @@ impl DiskManager {
         }
         let mut f = self.f.lock().unwrap();
         f.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
-        let mut f = self.f.lock().unwrap();
         let byte_written = f.write(buf)?;
         if byte_written != self.page_size {
             return Err(StrErr::new("invalid bytes written"));
@@ -365,18 +403,19 @@ mod tests {
         let bpm = BufferPool::new(10, repl);
         let mu = Mutex::new(bpm);
 
-        let mut page0 = BufferPool::new_page(&mu, &dm).unwrap();
-        assert_eq!(0, page0.lock().unwrap().page_id);
-
         let mut random_bin_data: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
         some_rng.read_exact(&mut random_bin_data[..]).unwrap();
 
         random_bin_data[PAGE_SIZE / 2] = '0' as u8;
         random_bin_data[PAGE_SIZE - 1] = '0' as u8;
-        let mut w = &mut page0.lock().unwrap().raw_data[..];
-        let mut r = &random_bin_data[..];
+        {
+            let page0 = BufferPool::new_page(&mu, &dm).unwrap();
+            assert_eq!(0, page0.lock().unwrap().page_id);
+            let mut w = &mut page0.lock().unwrap().raw_data[..];
+            let mut r = &random_bin_data[..];
+            copy(&mut r, &mut w).unwrap();
+        }
 
-        copy(&mut r, &mut w).unwrap();
         for _ in 1..pool_size {
             match BufferPool::new_page(&mu, &dm) {
                 Ok(_) => {}
@@ -388,9 +427,24 @@ mod tests {
                 Ok(_) => {
                     panic!("not expect this call to return success")
                 }
-                Err(some_err) => assert_eq!("oom", format!("{:?}", some_err)),
+                Err(some_err) => assert_eq!("oom", some_err.root),
             };
         }
+
+        for i in 0..5 {
+            assert_eq!(true, BufferPool::unpin_page(&mu, i, true).unwrap());
+            BufferPool::flush_page(&mu, i, &dm).unwrap();
+        }
+        for i in 0..5 {
+            let some_page = BufferPool::new_page(&mu, &dm).unwrap();
+            assert_eq!(
+                true,
+                BufferPool::unpin_page(&mu, some_page.lock().unwrap().page_id, false).unwrap()
+            );
+        }
+        let page0 = BufferPool::fetch_page(&mu, &dm, 0).unwrap();
+        assert_eq!(&page0.lock().unwrap().raw_data[..], &random_bin_data[..]);
+        assert_eq!(true, BufferPool::unpin_page(&mu, 0, false).unwrap());
     }
 
     /*

@@ -20,3 +20,10 @@ path = "play/main.rs"
 [[bin]]
 name= "bpm"
 path = "src/main.rs"
+
+[profile.dev]
+opt-level = 0
+debug = true
+[profile.release]
+opt-level = 3
+debug = false
