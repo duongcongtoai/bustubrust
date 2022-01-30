@@ -1,20 +1,52 @@
 use core::cell::RefCell;
 use libc::O_DIRECT;
+use parking_lot::{Mutex, MutexGuard};
 use std::borrow::Borrow;
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::os::unix::fs::OpenOptionsExt;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
 use std::{
     fs::{File, OpenOptions},
     hash::Hasher,
     io::{copy, empty, Error, Read, Seek, SeekFrom, Write},
 };
+pub struct BufferPoolManager<R: Replacer> {
+    bp: Mutex<BufferPool<R>>,
+    dm: DiskManager,
+}
 
-struct BufferPool<R: Replacer> {
+impl<R> BufferPoolManager<R>
+where
+    R: Replacer,
+{
+    pub fn new(max_size: usize, r: R, dm: DiskManager) -> Self {
+        let bp = BufferPool::new(max_size, r);
+        BufferPoolManager {
+            bp: Mutex::new(bp),
+            dm,
+        }
+    }
+
+    pub fn new_page(&self) -> Result<Arc<Mutex<Frame>>, StrErr> {
+        let dm = &self.dm;
+        BufferPool::new_page(&self.bp, dm)
+    }
+
+    pub fn fetch_page(&self, page_id: PageID) -> Result<Arc<Mutex<Frame>>, StrErr> {
+        BufferPool::fetch_page(&self.bp, &self.dm, page_id)
+    }
+
+    pub fn unpin_page(&self, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
+        BufferPool::unpin_page(&self.bp, page_id, dirty)
+    }
+    pub fn flush_page(&self, page_id: PageID) -> Result<(), StrErr> {
+        BufferPool::flush_page(&self.bp, page_id, &self.dm)
+    }
+}
+
+pub struct BufferPool<R: Replacer> {
     frames: RefCell<Vec<Arc<Mutex<Frame>>>>,
     page_table: RefCell<HashMap<i64, FrameID>>,
     size: usize,
@@ -114,11 +146,11 @@ where
     }
 
     fn new_page(mu: &Mutex<BufferPool<R>>, dm: &DiskManager) -> Result<Arc<Mutex<Frame>>, StrErr> {
-        let b = mu.lock().unwrap();
+        let b = mu.lock();
 
         let (free_frame, victimed) = Self::_frame_from_freelist_or_replacer(&b)?;
         let chosen_frame = Self::fetch_frame(&b, free_frame)?;
-        let mut locked_chosen_frame = chosen_frame.lock().unwrap();
+        let mut locked_chosen_frame = chosen_frame.lock();
         let new_page_id = Self::_allocate_page_id_locked(&b);
 
         Self::_prepare_new_frame_meta(&b, &locked_chosen_frame, free_frame, new_page_id)?;
@@ -145,9 +177,7 @@ where
 
         let maybe_frame = page_table.get(&page_id);
         match maybe_frame {
-            Some(frame_id) => {
-                Some(*frame_id)
-            }
+            Some(frame_id) => Some(*frame_id),
             None => None,
         }
     }
@@ -162,7 +192,7 @@ where
         match maybe_frame {
             Some(frame_id) => {
                 let frame = Self::fetch_frame(&b, *frame_id)?;
-                let mut locked_frame = frame.lock().unwrap();
+                let mut locked_frame = frame.lock();
                 locked_frame.pin();
                 b.replacer.borrow().pin(*frame_id);
                 drop(locked_frame);
@@ -192,12 +222,6 @@ where
                     return Err(StrErr::new("oom"));
                 }
             };
-            /* let maybe_frame = b.replacer.victim();
-            match ma
-            if !ok {
-                return Err(StrErr::new("oom"));
-            }
-            return Ok((frame_id, true)); */
         }
     }
     fn fetch_page(
@@ -205,7 +229,7 @@ where
         dm: &DiskManager,
         page_id: PageID,
     ) -> Result<Arc<Mutex<Frame>>, StrErr> {
-        let b = mu.lock().unwrap();
+        let b = mu.lock();
         match Self::_check_and_get_page_available_in_buffer(&b, page_id)? {
             Some(frame) => return Ok(frame),
             None => {}
@@ -215,7 +239,7 @@ where
         let (free_frame, victimed) = Self::_frame_from_freelist_or_replacer(&b)?;
 
         let chosen_frame = Self::fetch_frame(&b, free_frame)?;
-        let mut locked_chosen_frame = chosen_frame.lock().unwrap();
+        let mut locked_chosen_frame = chosen_frame.lock();
 
         Self::_prepare_new_frame_meta(&b, &locked_chosen_frame, free_frame, page_id)?;
 
@@ -235,14 +259,13 @@ where
     }
 
     fn unpin_page(mu: &Mutex<BufferPool<R>>, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
-        let b = mu.lock().unwrap();
+        let b = mu.lock();
         match Self::_check_page_available_in_buffer(&b, page_id) {
             Some(frame_id) => {
                 let frame = Self::fetch_frame(&b, frame_id)?;
-                let mut locked_frame = frame.lock().unwrap();
+                let mut locked_frame = frame.lock();
                 locked_frame.pin_count -= 1;
                 locked_frame.dirty = dirty;
-                println!("unppining: {}", locked_frame.pin_count);
                 if locked_frame.pin_count == 0 {
                     b.replacer.borrow().unpin(frame_id);
                 }
@@ -257,14 +280,14 @@ where
         page_id: PageID,
         dm: &DiskManager,
     ) -> Result<(), StrErr> {
-        let b = mu.lock().unwrap();
+        let b = mu.lock();
         match Self::_check_page_available_in_buffer(&b, page_id) {
             Some(frame_id) => {
                 let frame = Self::fetch_frame(&b, frame_id)?;
                 drop(b);
-                dm.write_from_frame_to_file(page_id, &mut frame.lock().unwrap().raw_data[..])?;
+                dm.write_from_frame_to_file(page_id, &mut frame.lock().raw_data[..])?;
             }
-            None => {},
+            None => {}
         }
         Ok(())
     }
@@ -303,12 +326,27 @@ pub trait Replacer {
     fn size(&self) -> i64;
 }
 
-struct Frame {
+pub struct Frame {
     id: FrameID,
     page_id: PageID,
     dirty: bool,
     raw_data: RawData,
     pin_count: i64,
+}
+impl Frame {
+    pub fn get_raw_data(&mut self) -> &mut RawData {
+        &mut self.raw_data
+    }
+
+    pub fn new_from_raw(raw_data: [u8; PAGE_SIZE]) -> Frame {
+        Frame {
+            id: 0,
+            page_id: 0,
+            dirty: false,
+            pin_count: 0,
+            raw_data,
+        }
+    }
 }
 
 pub const PAGE_SIZE: usize = 4096;
@@ -360,7 +398,7 @@ impl DiskManager {
     }
 
     pub fn read_into_frame(&self, page_id: PageID, buf: &mut [u8]) -> Result<(), StrErr> {
-        let mut f = self.f.lock().unwrap();
+        let mut f = self.f.lock();
         f.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
         let read_bytes = f.read(&mut buf[..self.page_size])?;
         if read_bytes != self.page_size {
@@ -373,7 +411,7 @@ impl DiskManager {
         if buf.len() != self.page_size {
             return Err(StrErr::new("frame has invalid length"));
         }
-        let mut f = self.f.lock().unwrap();
+        let mut f = self.f.lock();
         f.seek(SeekFrom::Start(page_id as u64 * self.page_size as u64))?;
         let byte_written = f.write(buf)?;
         if byte_written != self.page_size {
@@ -388,13 +426,12 @@ impl DiskManager {
 mod tests {
     use super::*;
     use crate::replacer::LRURepl;
-    use rand::prelude::*;
     use rand::{thread_rng, RngCore};
-    use std::io::{copy, Read, Write};
+    use std::io::{copy, Read};
     use tempfile::tempfile;
 
     #[test]
-    fn test() {
+    fn test_sample() {
         let mut some_rng: Box<dyn RngCore> = Box::new(thread_rng());
 
         let pool_size = 10;
@@ -410,8 +447,8 @@ mod tests {
         random_bin_data[PAGE_SIZE - 1] = '0' as u8;
         {
             let page0 = BufferPool::new_page(&mu, &dm).unwrap();
-            assert_eq!(0, page0.lock().unwrap().page_id);
-            let mut w = &mut page0.lock().unwrap().raw_data[..];
+            assert_eq!(0, page0.lock().page_id);
+            let mut w = &mut page0.lock().raw_data[..];
             let mut r = &random_bin_data[..];
             copy(&mut r, &mut w).unwrap();
         }
@@ -435,34 +472,78 @@ mod tests {
             assert_eq!(true, BufferPool::unpin_page(&mu, i, true).unwrap());
             BufferPool::flush_page(&mu, i, &dm).unwrap();
         }
-        for i in 0..5 {
+
+        for i in 0..4 {
             let some_page = BufferPool::new_page(&mu, &dm).unwrap();
-            assert_eq!(
-                true,
-                BufferPool::unpin_page(&mu, some_page.lock().unwrap().page_id, false).unwrap()
-            );
         }
         let page0 = BufferPool::fetch_page(&mu, &dm, 0).unwrap();
-        assert_eq!(&page0.lock().unwrap().raw_data[..], &random_bin_data[..]);
+        assert_eq!(&page0.lock().raw_data[..], &random_bin_data[..]);
+        assert_eq!(true, BufferPool::unpin_page(&mu, 0, false).unwrap());
+
+        match BufferPool::new_page(&mu, &dm) {
+            Ok(_) => {}
+            Err(some_err) => panic!("calling new page has err {:?}", some_err),
+        }
+        match BufferPool::fetch_page(&mu, &dm, 0) {
+            Ok(_) => {
+                panic!("not expect this call to return success")
+            }
+            Err(some_err) => assert_eq!("oom", some_err.root),
+        }
+    }
+
+    #[test]
+    fn test_binary() {
+        let mut some_rng: Box<dyn RngCore> = Box::new(thread_rng());
+
+        let pool_size = 10;
+        let dm = DiskManager::new_from_file(tempfile().unwrap(), PAGE_SIZE as u64);
+        let repl = LRURepl::new(pool_size);
+        let bpm = BufferPool::new(10, repl);
+        let mu = Mutex::new(bpm);
+
+        let mut random_bin_data: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
+        some_rng.read_exact(&mut random_bin_data[..]).unwrap();
+
+        random_bin_data[PAGE_SIZE / 2] = '0' as u8;
+        random_bin_data[PAGE_SIZE - 1] = '0' as u8;
+        {
+            let page0 = BufferPool::new_page(&mu, &dm).unwrap();
+            assert_eq!(0, page0.lock().page_id);
+            let mut w = &mut page0.lock().raw_data[..];
+            let mut r = &random_bin_data[..];
+            copy(&mut r, &mut w).unwrap();
+        }
+
+        for _ in 1..pool_size {
+            match BufferPool::new_page(&mu, &dm) {
+                Ok(_) => {}
+                Err(some_err) => panic!("fetching page has err {:?}", some_err),
+            };
+        }
+        for i in pool_size..pool_size * 2 {
+            match BufferPool::new_page(&mu, &dm) {
+                Ok(_) => {
+                    panic!("not expect this call to return success")
+                }
+                Err(some_err) => assert_eq!("oom", some_err.root),
+            };
+        }
+
+        for i in 0..5 {
+            assert_eq!(true, BufferPool::unpin_page(&mu, i, true).unwrap());
+            BufferPool::flush_page(&mu, i, &dm).unwrap();
+        }
+
+        for i in 0..5 {
+            let some_page = BufferPool::new_page(&mu, &dm).unwrap();
+            // this is important, after this line, the lock of the page is drop, so
+            // that buffer pool can acquire the lock on the frame
+            let page_id = some_page.lock().page_id;
+            assert_eq!(true, BufferPool::unpin_page(&mu, page_id, false).unwrap());
+        }
+        let page0 = BufferPool::fetch_page(&mu, &dm, 0).unwrap();
+        assert_eq!(&page0.lock().raw_data[..], &random_bin_data[..]);
         assert_eq!(true, BufferPool::unpin_page(&mu, 0, false).unwrap());
     }
-
-    /*
-
-    // should be able to create more 5 page after unpinning 5 page
-    for i := 0; i < 5; i++ {
-        assert.True(t, bpm.UnpinPage(i, true))
-        bpm.FlushPage(i)
-    }
-
-    for i := 0; i < 5; i++ {
-        p := bpm.NewPage()
-        assert.NotNil(t, p)
-        bpm.UnpinPage(p.pageID, false)
-    }
-
-    page0, err := bpm.FetchPage(0)
-    assert.NoError(t, err)
-    assert.Equal(t, page0.GetData(), randomBinData[:])
-    assert.True(t, bpm.UnpinPage(0, true)) */
 }
