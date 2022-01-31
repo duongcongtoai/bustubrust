@@ -224,12 +224,14 @@ where
             };
         }
     }
+
     fn fetch_page(
         mu: &Mutex<BufferPool<R>>,
         dm: &DiskManager,
         page_id: PageID,
     ) -> Result<Arc<Mutex<Frame>>, StrErr> {
         let b = mu.lock();
+
         match Self::_check_and_get_page_available_in_buffer(&b, page_id)? {
             Some(frame) => return Ok(frame),
             None => {}
@@ -334,6 +336,9 @@ pub struct Frame {
     pin_count: i64,
 }
 impl Frame {
+    pub fn get_page_id(&self) -> i64 {
+        self.page_id
+    }
     pub fn get_raw_data(&mut self) -> &mut RawData {
         &mut self.raw_data
     }
@@ -361,7 +366,7 @@ pub struct StrErr {
     root: String,
 }
 impl StrErr {
-    fn new(st: &str) -> Self {
+    pub fn new(st: &str) -> Self {
         StrErr {
             root: st.to_string(),
         }

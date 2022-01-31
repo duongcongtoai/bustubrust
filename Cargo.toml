@@ -7,16 +7,31 @@ edition = "2018"
 
 [dependencies]
 bytemuck = "1.7.3"
+crossbeam = "0.8.1"
+crossbeam-epoch = "0.9.6"
 dashmap = "4.0.2"
+fragile = "1.1.0"
 ghost-cell = "0.2.2"
+iota = "0.2.2"
 libc = "0.2.113"
 lock_api = "0.4.6"
 lru = "0.7.2"
+owning_ref = "0.4.1"
 parking_lot = "0.12.0"
 rand = "0.8.4"
 tempfile = "3.3.0"
 
+[features]
+testing=[]
 
+
+[lib]
+name = "bustubrust"
+path = "src/lib.rs"
+
+# [lib]
+# name = "playlib"
+# path = "play/lib.rs"
 
 [[bin]]
 name= "play"

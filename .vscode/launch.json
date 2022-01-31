@@ -8,7 +8,7 @@
 			"name": "Run Test Debugger",
 			"type": "lldb",
 			"request": "launch",
-			"program": "${workspaceFolder}/target/debug/deps/bustubrust-401ef2aafa92011c",
+			"program": "${workspaceFolder}/target/debug/deps/bustubrust-c968a893aa45409b",
 			"args": [],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
