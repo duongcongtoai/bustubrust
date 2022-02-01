@@ -313,7 +313,7 @@ impl Frame {
 pub type FrameID = usize;
 pub type PageID = i64;
 
-const INVALID_PAGE_ID: PageID = -1;
+pub const INVALID_PAGE_ID: PageID = -1;
 
 pub trait Replacer {
     fn victim(&self) -> Option<FrameID>;
