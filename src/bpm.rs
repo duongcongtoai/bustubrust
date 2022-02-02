@@ -1,8 +1,8 @@
 use core::cell::RefCell;
 use libc::O_DIRECT;
+use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
 use std::borrow::Borrow;
-use std::borrow::BorrowMut;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::os::unix::fs::OpenOptionsExt;
@@ -36,6 +36,24 @@ where
 
     pub fn fetch_page(&self, page_id: PageID) -> Result<Arc<Mutex<Frame>>, StrErr> {
         BufferPool::fetch_page(&self.bp, &self.dm, page_id)
+    }
+
+    // caller must previously acquire latches of frames, not
+    // it return the latches in batch
+    pub fn batch_flush<'a>(
+        &self,
+        items: impl Iterator<Item = OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'a, Frame>>>,
+    ) -> Result<(), StrErr> {
+        for item in items {
+            BufferPool::unpin_flush_frame_locked(&self.bp, item.page_id, item, &self.dm)
+                .expect("failed to unpin and flush page");
+        }
+        Ok(())
+    }
+    pub fn flush_locked<'a>(&self, item: &mut MutexGuard<'a, Frame>) -> Result<(), StrErr> {
+        BufferPool::flush_frame_locked(&self.bp, item.page_id, item, &self.dm)
+            .expect("failed to flush page");
+        Ok(())
     }
 
     pub fn unpin_page(&self, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
@@ -275,6 +293,32 @@ where
             }
             None => Ok(false),
         }
+    }
+    fn flush_frame_locked<'op>(
+        mu: &Mutex<BufferPool<R>>,
+        page_id: PageID,
+        locked: &mut MutexGuard<'op, Frame>,
+        dm: &DiskManager,
+    ) -> Result<(), StrErr> {
+        dm.write_from_frame_to_file(page_id, &mut locked.raw_data[..])?;
+        Ok(())
+    }
+
+    fn unpin_flush_frame_locked<'op>(
+        mu: &Mutex<BufferPool<R>>,
+        page_id: PageID,
+        mut locked: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'op, Frame>>,
+        dm: &DiskManager,
+    ) -> Result<(), StrErr> {
+        let b = mu.lock();
+        locked.pin_count -= 1;
+        locked.dirty = false;
+        if locked.pin_count == 0 {
+            b.replacer.borrow().unpin(locked.id);
+        }
+        drop(b);
+        dm.write_from_frame_to_file(page_id, &mut locked.raw_data[..])?;
+        Ok(())
     }
 
     fn flush_page(

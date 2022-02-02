@@ -12,7 +12,7 @@ use std::mem::size_of;
 use std::sync::Arc;
 use tinyvec::SliceVec;
 
-trait DBType: Copy + Ord + Pod + Debug {}
+trait DBType: Copy + Ord + Pod + Debug + Default {}
 
 #[allow(dead_code)]
 struct Tree<'a, R, K, V>
@@ -26,7 +26,7 @@ where
     bpm: &'a BufferPoolManager<R>,
     _1: PhantomData<(K, V)>,
 }
-struct BreadCrumb<'a, K: Pod, V: Pod> {
+struct PageLatch<'a, K: Pod, V: Pod> {
     // need this to handle lock/unlock
     origin: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'a, Frame>>,
     _mapped: NodePage<'a, K, V>,
@@ -34,31 +34,35 @@ struct BreadCrumb<'a, K: Pod, V: Pod> {
 }
 
 struct Access<'a, K: DBType, V: DBType> {
-    bread_crumbs: Vec<BreadCrumb<'a, K, V>>,
-    to_cleaned: Vec<i64>,
-    to_flushed: Vec<i64>,
+    bread_crumbs: Vec<PageLatch<'a, K, V>>,
+    to_clean: Vec<PageLatch<'a, K, V>>,
+    flush_head: bool,
+    // exclusive_flush: Vec<i64>, // flush only
 }
 impl<'a, K: DBType, V: DBType> Access<'a, K, V> {
-    fn pop_next(&mut self) -> Option<BreadCrumb<'a, K, V>> {
+    fn pop_next(&mut self) -> Option<PageLatch<'a, K, V>> {
         let ret = self.bread_crumbs.pop()?;
-        self.to_cleaned.push(ret.origin.get_page_id());
+        // self.to_clean.push(ret.origin.get_page_id());
         return Some(ret);
+    }
+    fn add_flush(&mut self, latch: PageLatch<'a, K, V>) {
+        self.to_clean.push(latch);
     }
 }
 impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
     fn default() -> Self {
         Access {
             bread_crumbs: vec![],
-            to_cleaned: vec![],
-            to_flushed: vec![],
+            to_clean: vec![],
+            flush_head: false,
         }
     }
 }
 
 #[allow(dead_code)]
 impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
-    fn _get_page<'op>(&mut self, page_id: i64) -> Result<BreadCrumb<'op, K, V>, StrErr> {
-        let bpm = self.bpm;
+    fn _get_page<'op>(&mut self, page_id: i64) -> Result<PageLatch<'op, K, V>, StrErr> {
+        // let bpm = self.bpm;
         let root_frame = self.bpm.fetch_page(page_id)?;
 
         let mut guard = OwningHandle::new_with_fn(root_frame, |mutex: *const Mutex<Frame>| {
@@ -72,7 +76,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
             node = NodePage::cast_generic(self.h.node_size, raw_data);
         };
 
-        let b = BreadCrumb {
+        let b = PageLatch {
             origin: guard,
             _mapped: node,
             ref_idx: 0,
@@ -80,7 +84,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         Ok(b)
     }
 
-    fn _get_root<'op>(&mut self) -> Result<BreadCrumb<'op, K, V>, StrErr> {
+    fn _get_root<'op>(&mut self) -> Result<PageLatch<'op, K, V>, StrErr> {
         return self._get_page(self.h.root_id);
     }
 
@@ -97,7 +101,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 "reached level 0 node but still have not found leaf node"
             );
             if let PageData::B(ref branch) = bread_crumb._mapped.data {
-                idx_from_parent = branch.find_next_child(&bread_crumb._mapped.header, search_key);
+                idx_from_parent = branch.find_next_child(search_key);
                 bread_crumb.ref_idx = idx_from_parent;
                 let next = branch.children[idx_from_parent];
                 if next != INVALID_PAGE_ID {
@@ -116,101 +120,195 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         acc.bread_crumbs.push(bread_crumb);
         return Ok(acc);
     }
+    fn _new_empty_branch<'op>(&self) -> Result<PageLatch<'op, K, V>, StrErr> {
+        let frame_for_new_page = self.bpm.new_page().expect("unable to allocate new page");
+        let mut guard =
+            OwningHandle::new_with_fn(frame_for_new_page, |mutex: *const Mutex<Frame>| {
+                let mutex: &Mutex<Frame> = unsafe { &*mutex };
+                return mutex.lock();
+            });
+        let node: NodePage<'op, K, V>;
+        unsafe {
+            // this raw_data lives as long as the guard
+            let raw_data = &mut *(guard.get_raw_data() as *mut [u8]);
 
-    fn insert(&mut self, key: K, val: V) -> Result<(), StrErr> {
-        let mut tx = self._search_leaf(&key)?;
-        let node = tx.pop_next().expect("want at least one breadcrumb item");
-        let leaf = node._mapped.leaf();
-        let idx = leaf.find_slot(&node._mapped.header, &key);
-        let comp = Val { key, val };
-        if leaf.data[idx] == comp {
-            return Err(StrErr::new("duplicate key found"));
+            node = NodePage::cast_branch_from_blank(self.h.node_size, raw_data);
+        };
+
+        let b = PageLatch {
+            origin: guard,
+            _mapped: node,
+            ref_idx: 0,
+        };
+        Ok(b)
+    }
+
+    fn _new_empty_leaf<'op>(&self) -> Result<PageLatch<'op, K, V>, StrErr> {
+        let frame_for_new_page = self.bpm.new_page().expect("unable to allocate new page");
+        let mut guard =
+            OwningHandle::new_with_fn(frame_for_new_page, |mutex: *const Mutex<Frame>| {
+                let mutex: &Mutex<Frame> = unsafe { &*mutex };
+                return mutex.lock();
+            });
+        let node: NodePage<'op, K, V>;
+        unsafe {
+            // this raw_data lives as long as the guard
+            let raw_data = &mut *(guard.get_raw_data() as *mut [u8]);
+
+            node = NodePage::cast_leaf_from_blank(self.h.node_size, raw_data);
+        };
+
+        let b = PageLatch {
+            origin: guard,
+            _mapped: node,
+            ref_idx: 0,
+        };
+        Ok(b)
+    }
+    fn _split_branch_node(
+        &self,
+        n: &mut NodePage<'a, K, V>,
+    ) -> Result<(PageLatch<'a, K, V>, K), StrErr> {
+        let mut new_right_node = self
+            ._new_empty_branch()
+            .expect("unable to create new blank branch");
+        // acc.add_flush(new_right_node.origin.get_page_id());
+        new_right_node._mapped.header.level = n.header.level;
+        let partition_idx = self.h.node_size as usize / 2;
+        let old_branch = n.data.branch();
+
+        let split_key = old_branch.keys[partition_idx];
+
+        let new_branch = &mut new_right_node._mapped.data.branch();
+        new_branch
+            .keys
+            .extend_from_slice(&old_branch.keys[partition_idx + 1..]);
+        new_branch
+            .children
+            .extend_from_slice(&old_branch.children[partition_idx + 1..]);
+        old_branch.keys.resize(partition_idx, K::default());
+        old_branch.children.resize(partition_idx + 1, 0);
+
+        // fix headers
+        new_right_node._mapped.header.size = n.header.size - partition_idx as i64 - 1;
+        n.header.size = partition_idx as i64;
+
+        Ok((new_right_node, split_key))
+    }
+
+    fn _split_leaf_node(
+        &self,
+        n: &mut NodePage<'a, K, V>,
+    ) -> Result<(PageLatch<'a, K, V>, K), StrErr> {
+        let mut new_node = self
+            ._new_empty_leaf()
+            .expect("unable to create new blank leaf");
+        // acc.add_flush(new_node.origin.get_page_id());
+        let partition_idx = self.h.node_size as usize / 2;
+        let old_leaf = n.data.leaf();
+
+        let new_leaf = &mut new_node._mapped.data.leaf();
+        new_leaf
+            .data
+            .extend_from_slice(&old_leaf.data[partition_idx..]);
+        old_leaf.data.resize(partition_idx, Val::default());
+
+        // fix headers
+        new_node._mapped.header.size = n.header.size - partition_idx as i64;
+        new_node._mapped.header.next = n.header.next;
+        n.header.size = partition_idx as i64;
+        n.header.next = new_node.origin.get_page_id();
+        let split_key = new_leaf.data[0].key;
+
+        Ok((new_node, split_key))
+    }
+
+    fn _insert_dirty(&'a mut self, key: K, val: V) -> Result<Access<K, V>, StrErr> {
+        let node_size = self.h.node_size;
+
+        // traverse the tree to find slot for this key
+        let mut acc = self._search_leaf(&key)?;
+        let mut written_leaf_latch = acc.pop_next().expect("want at least one breadcrumb item");
+        let mut leaf_header = &mut written_leaf_latch._mapped.header;
+        let leaf_page = &mut written_leaf_latch._mapped.data;
+
+        let leaf_data = leaf_page.leaf();
+        {
+            let comp = Val { key, val };
+            let idx = leaf_data.find_slot(&comp)?;
+            leaf_data.data.insert(idx, comp);
+            leaf_header.size += 1;
         }
-        // leaf.data.insert()
+        // valid size
+        if leaf_header.size < node_size {
+            return Ok(acc);
+        }
+        let (orphan, split_key) = self
+            ._split_leaf_node(&mut written_leaf_latch._mapped)
+            .expect("unable to split node");
+        let mut orphan_id = orphan.origin.get_page_id();
+        let mut split_key = split_key;
+        acc.add_flush(written_leaf_latch);
+        acc.add_flush(orphan);
+
+        loop {
+            let mut current_parent_latch = acc.pop_next().expect("not expect return empty item");
+            let current_parent = current_parent_latch._mapped.data.branch();
+            let idx = current_parent.find_slot(&split_key)?;
+            current_parent.children.insert(idx + 1, orphan_id);
+            current_parent.keys.insert(idx, split_key);
+            current_parent_latch._mapped.header.size += 1;
+            if current_parent_latch._mapped.header.size < node_size {
+                return Ok(acc);
+            }
+
+            let (new_orphan, new_slit_key) = self
+                ._split_branch_node(&mut current_parent_latch._mapped)
+                .expect("unable to split branch node");
+            orphan_id = new_orphan.origin.get_page_id();
+
+            split_key = new_slit_key;
+            if acc.bread_crumbs.len() == 0 {
+                let mut new_root = self
+                    ._new_empty_branch()
+                    .expect("unable to create new blank branch");
+                // acc.add_flush(new_root.origin.get_page_id());
+                let new_level = new_orphan._mapped.header.level + 1;
+                new_root._mapped.header.level = new_level;
+                let new_root_branch = new_root._mapped.data.branch();
+                let current_root = self.h.root_id;
+                new_root_branch.children.push(current_root);
+                new_root_branch.children.push(orphan_id);
+                new_root_branch.keys.push(split_key);
+                self.h.root_id = new_root.origin.get_page_id();
+                acc.flush_head = true;
+
+                acc.add_flush(new_orphan);
+                acc.add_flush(current_parent_latch);
+                break;
+            }
+
+            acc.add_flush(new_orphan);
+            acc.add_flush(current_parent_latch);
+        }
+        return Ok(acc);
+    }
+
+    fn insert(&'a mut self, key: K, val: V) -> Result<(), StrErr> {
+        let bpm = self.bpm;
+        let h_lock = self.h_lock.clone();
+        let acc = self._insert_dirty(key, val).expect("failed to insert");
+        let flush_unpins = acc.to_clean.into_iter().map(|x| x.origin);
+        bpm.batch_flush(flush_unpins)
+            .expect("failed flushing in batch");
+        if acc.flush_head {
+            let mut locked = h_lock.lock();
+            bpm.flush_locked(&mut locked)
+                .expect("failed to flush header page");
+        }
+
         Ok(())
     }
-    /*
-        n := breadCrumb.node
-
-        // normal insertion
-        {
-            idx, exact := t.leafNodeFindKeySlot(n, key)
-            if exact {
-                return fmt.Errorf("duplicate key found %v", key)
-            }
-            copy(n.datas[idx+1:n.size+1], n.datas[idx:n.size])
-            n.datas[idx] = valT{
-                val: keyT{main: int64(val)},
-                key: key,
-            }
-            n.size++
-        }
-
-        if n.size < t._header.nodeSize {
-            return nil
-        }
-        orphan, splitKey, err := t.splitLeafNode(&tx, n)
-        if err != nil {
-            return err
-        }
-
-        // retrieve currentParent from cursor latest stack
-        // if currentParent ==nil, create new currentParent(in this case current leaf is also the root node)
-        var currentParent *genericNode
-
-        for len(tx.breadCrumbs) > 0 {
-            curStack := tx.breadCrumbs[len(tx.breadCrumbs)-1]
-            currentParent = curStack.node
-            tx.breadCrumbs = tx.breadCrumbs[:len(tx.breadCrumbs)-1]
-
-            idx, err := currentParent.findUniquePointerIdx(splitKey)
-            if err != nil {
-                return err
-            }
-
-            currentParent._insertPointerAtIdx(int64(idx), &orphanNode{
-                key:        splitKey,
-                rightChild: orphan,
-            }, t._header.nodeSize)
-            if currentParent.size < t._header.nodeSize {
-                return nil
-            }
-            // this parent is also full
-
-            newOrphan, newSplitKey, err := t.splitBranchNode(&tx, currentParent)
-            if err != nil {
-                return err
-            }
-
-            // let the next iteration handle this split with new parent propagated up the stack
-            orphan = newOrphan
-            splitKey = newSplitKey
-        }
-        // if reach this line, the higest level parent (root) has been recently split
-        root, err := t.getRootNode()
-        if err != nil {
-            return err
-        }
-
-        newLevel := root.level + 1
-
-        newRoot, err := t.newEmptyBranchNode()
-        if err != nil {
-            return err
-        }
-        tx.addUnpin(nodeID(newRoot.osPage.GetPageID()))
-        newRoot.level = newLevel
-        newRoot.children[0] = nodeID(root.osPage.GetPageID())
-        newRoot._insertPointerAtIdx(0, &orphanNode{
-            key:        splitKey,
-            rightChild: orphan,
-        }, t._header.nodeSize)
-        t._header.rootPgid = nodeID(newRoot.osPage.GetPageID())
-
-        // headerPage Updated, flush instead of unpin (header page is always pinned)
-        tx.addFlush(0)
-        return nil
-    } */
 
     fn new(bpm: &'a BufferPoolManager<R>, node_size: i64) -> Result<Tree<'a, R, K, V>, StrErr> {
         match bpm.fetch_page(0) {
@@ -234,7 +332,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                     h.flags ^= HEADER_FLAG_INIT;
 
                     h.node_size = node_size;
-                    let root_page = bpm.new_page()?;
+                    let root_page = bpm.new_page().expect("unable to allocate new page");
                     let mut locked_page = root_page.lock();
                     let page_id = locked_page.get_page_id();
                     // first time db is created, prepare an empty leaf-root node
@@ -344,7 +442,7 @@ where
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
 struct Val<K, V> {
     key: K,
     val: V,
@@ -358,14 +456,25 @@ unsafe impl Pod for PageHeader {}
 unsafe impl Zeroable for PageHeader {}
 
 impl<'a, K: DBType, V: DBType> LeafData<'a, K, V> {
-    fn find_slot(&self, h: &PageHeader, search_key: &K) -> usize {
-        return self.data[..h.size as usize].partition_point(|&x| x.key <= *search_key);
+    fn find_slot(&self, data_key: &Val<K, V>) -> Result<usize, StrErr> {
+        let idx = self.data.partition_point(|&x| x.key <= data_key.key);
+        if self.data[idx] == *data_key {
+            return Err(StrErr::new("duplicate key found"));
+        }
+        return Ok(idx);
     }
 }
 
 impl<'a, K: DBType> BranchData<'a, K> {
-    fn find_next_child(&self, h: &PageHeader, search_key: &K) -> usize {
-        return self.keys[..h.size as usize].partition_point(|&x| x <= *search_key);
+    fn find_next_child(&self, search_key: &K) -> usize {
+        return self.keys.partition_point(|&x| x <= *search_key);
+    }
+    fn find_slot(&self, data_key: &K) -> Result<usize, StrErr> {
+        let idx = self.keys.partition_point(|&x| x <= *data_key);
+        if self.keys[idx] == *data_key {
+            return Err(StrErr::new("duplicate key found"));
+        }
+        return Ok(idx);
     }
 }
 
@@ -377,17 +486,17 @@ where
     header: &'a mut PageHeader,
     data: PageData<'a, K, V>,
 }
-impl<'a, K: Sized + Pod, V: Sized + Pod> NodePage<'a, K, V> {
-    fn branch(&self) -> &'a BranchData<K> {
-        if let PageData::B(some_branch) = &self.data {
-            &some_branch
+impl<'a, K: Sized + Pod, V: Sized + Pod> PageData<'a, K, V> {
+    fn branch(&mut self) -> &mut BranchData<'a, K> {
+        if let PageData::B(some_branch) = self {
+            some_branch
         } else {
             panic!("want branch data")
         }
     }
-    fn leaf(&self) -> &'a LeafData<K, V> {
-        if let PageData::L(some_leaf) = &self.data {
-            &some_leaf
+    fn leaf(&mut self) -> &mut LeafData<'a, K, V> {
+        if let PageData::L(some_leaf) = self {
+            some_leaf
         } else {
             panic!("want leaf data")
         }
@@ -401,7 +510,7 @@ struct PageHeader {
     is_leaf: bool,
     _padding2: [u8; 6],
     level: i64,
-    size: i64,
+    size: i64, // size of keys(for branch) or data (for leaf)
     next: i64,
 }
 
@@ -466,7 +575,7 @@ pub mod tests {
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempfile;
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
     struct KeyT {
         main: i64,
         sub: i64,
@@ -494,15 +603,16 @@ pub mod tests {
             keys.push(KeyT { main: i, sub: 0 });
             children.push(i);
         }
-        let branch = BranchData {
-            keys: SliceVec::from_slice_len(&mut keys[..], 10),
-            children: SliceVec::from_slice_len(&mut children[..], 11),
-        };
+
         // vector from 0..9
 
         // (size of slice, search key, expect index returned)
         let suites = vec![(9, 0, 1), (9, -1, 0), (9, 9, 9)];
         for item in &suites {
+            let branch = BranchData {
+                keys: SliceVec::from_slice_len(&mut keys[..], item.0 as usize),
+                children: SliceVec::from_slice_len(&mut children[..], item.0 as usize + 1),
+            };
             let header = PageHeader {
                 is_deleted: false,
                 is_leaf: false,
@@ -512,14 +622,11 @@ pub mod tests {
                 next: 0,
             };
 
-            let ret = branch.find_next_child(
-                &header,
-                &KeyT {
-                    main: item.1,
-                    sub: 0,
-                },
-            );
-            assert_eq!(item.2, ret);
+            let ret = branch.find_next_child(&KeyT {
+                main: item.1,
+                sub: 0,
+            });
+            assert_eq!(item.2, ret, "failed at item {:?}", item);
         }
     }
 
@@ -642,7 +749,7 @@ pub mod tests {
         };
 
         let mut checked_data = Vec::new(); // clone for further check
-        for i in 0..node_size as usize {
+        for _ in 0..node_size as usize {
             let key = KeyT {
                 main: some_rng.gen(),
                 sub: some_rng.gen(),
