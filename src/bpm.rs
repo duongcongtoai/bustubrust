@@ -6,6 +6,7 @@ use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::os::unix::fs::OpenOptionsExt;
+// use std::fs::Metadata;
 use std::sync::Arc;
 use std::{
     fs::{File, OpenOptions},
@@ -14,7 +15,7 @@ use std::{
 };
 pub struct BufferPoolManager<R: Replacer> {
     bp: Mutex<BufferPool<R>>,
-    dm: DiskManager,
+    pub dm: DiskManager,
 }
 
 impl<R> BufferPoolManager<R>
@@ -56,12 +57,22 @@ where
         Ok(())
     }
 
-    pub fn unpin_page(&self, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
+    pub fn unpin_locked<'a>(
+        &self,
+        item: &mut MutexGuard<'a, Frame>,
+        dirty: bool,
+    ) -> Result<(), StrErr> {
+        BufferPool::unpin_frame_locked(&self.bp, item.page_id, item, dirty)
+            .expect("failed to flush page");
+        Ok(())
+    }
+
+    /* pub fn unpin_page(&self, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
         BufferPool::unpin_page(&self.bp, page_id, dirty)
-    }
-    pub fn flush_page(&self, page_id: PageID) -> Result<(), StrErr> {
+    } */
+    /* pub fn flush_page(&self, page_id: PageID) -> Result<(), StrErr> {
         BufferPool::flush_page(&self.bp, page_id, &self.dm)
-    }
+    } */
 }
 
 pub struct BufferPool<R: Replacer> {
@@ -90,6 +101,7 @@ where
                 page_id: INVALID_PAGE_ID,
                 id: i,
                 dirty: false,
+                _1: [0; 7],
                 pin_count: 0,
                 raw_data: [0u8; PAGE_SIZE],
             })));
@@ -294,6 +306,21 @@ where
             None => Ok(false),
         }
     }
+    fn unpin_frame_locked<'op>(
+        mu: &Mutex<BufferPool<R>>,
+        page_id: PageID,
+        locked: &mut MutexGuard<'op, Frame>,
+        dirty: bool,
+    ) -> Result<(), StrErr> {
+        let b = mu.lock();
+        locked.pin_count -= 1;
+        locked.dirty = dirty;
+        if locked.pin_count == 0 {
+            b.replacer.borrow().unpin(locked.id);
+        }
+        Ok(())
+    }
+
     fn flush_frame_locked<'op>(
         mu: &Mutex<BufferPool<R>>,
         page_id: PageID,
@@ -372,10 +399,12 @@ pub trait Replacer {
     fn size(&self) -> i64;
 }
 
+#[repr(C)]
 pub struct Frame {
     id: FrameID,
     page_id: PageID,
     dirty: bool,
+    _1: [u8; 7],
     raw_data: RawData,
     pin_count: i64,
 }
@@ -392,6 +421,7 @@ impl Frame {
             id: 0,
             page_id: 0,
             dirty: false,
+            _1: [0; 7],
             pin_count: 0,
             raw_data,
         }
@@ -431,6 +461,13 @@ impl DiskManager {
             f: Mutex::new(f),
             page_size: (page_size as usize),
         };
+    }
+    pub fn file_size(&self) -> Result<u64, StrErr> {
+        let f = self.f.lock();
+        let size = File::metadata(&*f)
+            .expect("failed to get file metadata")
+            .len();
+        return Ok(size);
     }
     pub fn new(filepath: String, page_size: u64) -> Self {
         File::create(filepath.clone()).expect("io error");

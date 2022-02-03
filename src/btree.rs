@@ -1,5 +1,6 @@
 use crate::bpm::Frame;
 use crate::bpm::INVALID_PAGE_ID;
+use crate::bpm::PAGE_SIZE;
 use crate::bpm::{BufferPoolManager, Replacer, StrErr};
 use bytemuck::try_from_bytes_mut;
 use bytemuck::{try_cast_slice_mut, Pod, Zeroable};
@@ -8,6 +9,7 @@ use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::mem::align_of;
 use std::mem::size_of;
 use std::sync::Arc;
 use tinyvec::SliceVec;
@@ -39,10 +41,10 @@ struct Access<'a, K: DBType, V: DBType> {
     flush_head: bool,
     // exclusive_flush: Vec<i64>, // flush only
 }
+
 impl<'a, K: DBType, V: DBType> Access<'a, K, V> {
     fn pop_next(&mut self) -> Option<PageLatch<'a, K, V>> {
         let ret = self.bread_crumbs.pop()?;
-        // self.to_clean.push(ret.origin.get_page_id());
         return Some(ret);
     }
     fn add_flush(&mut self, latch: PageLatch<'a, K, V>) {
@@ -105,7 +107,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 bread_crumb.ref_idx = idx_from_parent;
                 let next = branch.children[idx_from_parent];
                 if next != INVALID_PAGE_ID {
-                    let next_node = self._get_root()?;
+                    let next_node = self._get_page(next)?;
                     cur_level -= 1;
                     acc.bread_crumbs.push(bread_crumb);
                     bread_crumb = next_node;
@@ -165,20 +167,18 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         };
         Ok(b)
     }
-    fn _split_branch_node(
+    fn _split_branch_node<'op>(
         &self,
-        n: &mut NodePage<'a, K, V>,
-    ) -> Result<(PageLatch<'a, K, V>, K), StrErr> {
+        n: &mut NodePage<'op, K, V>,
+    ) -> Result<(PageLatch<'op, K, V>, K), StrErr> {
         let mut new_right_node = self
             ._new_empty_branch()
             .expect("unable to create new blank branch");
-        // acc.add_flush(new_right_node.origin.get_page_id());
         new_right_node._mapped.header.level = n.header.level;
         let partition_idx = self.h.node_size as usize / 2;
         let old_branch = n.data.branch();
 
         let split_key = old_branch.keys[partition_idx];
-
         let new_branch = &mut new_right_node._mapped.data.branch();
         new_branch
             .keys
@@ -186,8 +186,15 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         new_branch
             .children
             .extend_from_slice(&old_branch.children[partition_idx + 1..]);
-        old_branch.keys.resize(partition_idx, K::default());
-        old_branch.children.resize(partition_idx + 1, 0);
+        for item in old_branch.keys[partition_idx..].iter_mut() {
+            *item = K::default()
+        }
+        for item in old_branch.children[partition_idx + 1..].iter_mut() {
+            *item = 0
+        }
+
+        old_branch.keys.truncate(partition_idx);
+        old_branch.children.truncate(partition_idx + 1);
 
         // fix headers
         new_right_node._mapped.header.size = n.header.size - partition_idx as i64 - 1;
@@ -196,14 +203,13 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         Ok((new_right_node, split_key))
     }
 
-    fn _split_leaf_node(
+    fn _split_leaf_node<'op>(
         &self,
-        n: &mut NodePage<'a, K, V>,
-    ) -> Result<(PageLatch<'a, K, V>, K), StrErr> {
+        n: &mut NodePage<'op, K, V>,
+    ) -> Result<(PageLatch<'op, K, V>, K), StrErr> {
         let mut new_node = self
             ._new_empty_leaf()
             .expect("unable to create new blank leaf");
-        // acc.add_flush(new_node.origin.get_page_id());
         let partition_idx = self.h.node_size as usize / 2;
         let old_leaf = n.data.leaf();
 
@@ -211,7 +217,10 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         new_leaf
             .data
             .extend_from_slice(&old_leaf.data[partition_idx..]);
-        old_leaf.data.resize(partition_idx, Val::default());
+        for item in old_leaf.data[partition_idx..].iter_mut() {
+            *item = Val::default()
+        }
+        old_leaf.data.truncate(partition_idx);
 
         // fix headers
         new_node._mapped.header.size = n.header.size - partition_idx as i64;
@@ -223,7 +232,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         Ok((new_node, split_key))
     }
 
-    fn _insert_dirty(&'a mut self, key: K, val: V) -> Result<Access<K, V>, StrErr> {
+    fn _insert_dirty<'op>(&mut self, key: K, val: V) -> Result<Access<'op, K, V>, StrErr> {
         let node_size = self.h.node_size;
 
         // traverse the tree to find slot for this key
@@ -248,6 +257,27 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
             .expect("unable to split node");
         let mut orphan_id = orphan.origin.get_page_id();
         let mut split_key = split_key;
+        {
+            if acc.bread_crumbs.len() == 0 {
+                let mut new_root = self
+                    ._new_empty_branch()
+                    .expect("unable to create new blank branch");
+                let new_level = orphan._mapped.header.level + 1;
+                new_root._mapped.header.level = new_level;
+                let new_root_branch = new_root._mapped.data.branch();
+                let current_root = self.h.root_id;
+                new_root._mapped.header.size += 1;
+                new_root_branch.children.push(current_root);
+                new_root_branch.children.push(orphan_id);
+                new_root_branch.keys.push(split_key);
+                self.h.root_id = new_root.origin.get_page_id();
+                acc.flush_head = true;
+
+                acc.add_flush(written_leaf_latch);
+                acc.add_flush(orphan);
+                return Ok(acc);
+            }
+        }
         acc.add_flush(written_leaf_latch);
         acc.add_flush(orphan);
 
@@ -275,6 +305,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 // acc.add_flush(new_root.origin.get_page_id());
                 let new_level = new_orphan._mapped.header.level + 1;
                 new_root._mapped.header.level = new_level;
+                new_root._mapped.header.size += 1;
                 let new_root_branch = new_root._mapped.data.branch();
                 let current_root = self.h.root_id;
                 new_root_branch.children.push(current_root);
@@ -293,30 +324,43 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         }
         return Ok(acc);
     }
-
-    fn insert(&'a mut self, key: K, val: V) -> Result<(), StrErr> {
+    fn _return_access_to_bpm<'op>(&self, acc: Access<'op, K, V>) -> Result<(), StrErr> {
         let bpm = self.bpm;
         let h_lock = self.h_lock.clone();
-        let acc = self._insert_dirty(key, val).expect("failed to insert");
+
+        let untouched = acc.bread_crumbs.into_iter().map(|x| x.origin);
         let flush_unpins = acc.to_clean.into_iter().map(|x| x.origin);
-        bpm.batch_flush(flush_unpins)
+        let total_flushed = untouched.chain(flush_unpins);
+        bpm.batch_flush(total_flushed)
             .expect("failed flushing in batch");
         if acc.flush_head {
             let mut locked = h_lock.lock();
             bpm.flush_locked(&mut locked)
                 .expect("failed to flush header page");
         }
-
         Ok(())
     }
 
+    fn insert(&mut self, key: K, val: V) -> Result<(), StrErr> {
+        let acc = self._insert_dirty(key, val).expect("failed to insert");
+        return self._return_access_to_bpm(acc);
+    }
+
     fn new(bpm: &'a BufferPoolManager<R>, node_size: i64) -> Result<Tree<'a, R, K, V>, StrErr> {
+        if bpm.dm.file_size()? < PAGE_SIZE as u64 {
+            let header_frame = bpm.new_page().expect("failed to create new page");
+            let mut locked_header = header_frame.lock();
+            if locked_header.get_page_id() != 0 {
+                return Err(StrErr::new("newly created header page has id not equal 0"));
+            }
+            bpm.flush_locked(&mut locked_header)?;
+        }
         match bpm.fetch_page(0) {
             Ok(header_frame) => {
                 // header_frame.into_inner().get_raw_data()
-                let mut locked = header_frame.lock();
+                let mut locked_header = header_frame.lock();
                 // let raw = header_frame.get_raw_data();
-                let h = HeaderPage::cast(locked.get_raw_data());
+                let h = HeaderPage::cast(locked_header.get_raw_data());
                 let long_lived_header: &'a mut HeaderPage;
 
                 // this is safe, as long as we make sure no other components can call
@@ -328,24 +372,28 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 if h.flags & HEADER_FLAG_LOCKED != 0 {
                     return Err(StrErr::new("page file has been locked by other process"));
                 }
+
+                h.flags ^= HEADER_FLAG_LOCKED;
                 if h.flags & HEADER_FLAG_INIT == 0 {
                     h.flags ^= HEADER_FLAG_INIT;
 
                     h.node_size = node_size;
                     let root_page = bpm.new_page().expect("unable to allocate new page");
-                    let mut locked_page = root_page.lock();
-                    let page_id = locked_page.get_page_id();
+                    let mut locked_root_page = root_page.lock();
+                    let page_id = locked_root_page.get_page_id();
                     // first time db is created, prepare an empty leaf-root node
                     let _: NodePage<K, V> =
-                        NodePage::cast_leaf_from_blank(node_size, locked_page.get_raw_data());
+                        NodePage::cast_leaf_from_blank(node_size, locked_root_page.get_raw_data());
                     h.root_id = page_id;
-                    bpm.flush_page(0)?; // new root page
-                    bpm.flush_page(page_id)?;
-                    bpm.unpin_page(page_id, false)?;
+                    bpm.flush_locked(&mut locked_header)
+                        .expect("can't flush page 0"); // new root page
+                    bpm.flush_locked(&mut locked_root_page)
+                        .expect(format!("cant flush page {:?}", page_id).as_str());
+                    bpm.unpin_locked(&mut locked_root_page, false)
+                        .expect(format!("cant unpin page {:?}", page_id).as_str());
                 }
 
-                h.flags ^= HEADER_FLAG_LOCKED;
-                drop(locked);
+                drop(locked_header);
                 Ok(Tree {
                     h: long_lived_header,
                     h_lock: header_frame,
@@ -380,10 +428,6 @@ where
                 let keys_end = node_size as usize * size_of::<K>();
                 let (raw_keys, next) = next.split_at_mut(keys_end);
                 let keys: &mut [K] = try_cast_slice_mut(raw_keys).unwrap();
-                println!("dbug: {:?} vs {:?}", keys.len(), header.size);
-                if header.size > keys.len() as i64 {
-                    println!("here");
-                }
                 let keys = SliceVec::from_slice_len(keys, header.size as usize);
 
                 let children_end = (node_size + 1) as usize * size_of::<i64>();
@@ -405,6 +449,7 @@ where
         let header = try_from_bytes_mut::<PageHeader>(raw_header).unwrap();
         let page_data: PageData<'a, K, V>;
         header.is_leaf = true;
+        header.next = INVALID_PAGE_ID;
 
         let end = node_size as usize * size_of::<Val<K, V>>();
         let (raw_data, _) = next.split_at_mut(end);
@@ -458,7 +503,7 @@ unsafe impl Zeroable for PageHeader {}
 impl<'a, K: DBType, V: DBType> LeafData<'a, K, V> {
     fn find_slot(&self, data_key: &Val<K, V>) -> Result<usize, StrErr> {
         let idx = self.data.partition_point(|&x| x.key <= data_key.key);
-        if self.data[idx] == *data_key {
+        if idx < self.data.len() && self.data[idx] == *data_key {
             return Err(StrErr::new("duplicate key found"));
         }
         return Ok(idx);
@@ -471,7 +516,7 @@ impl<'a, K: DBType> BranchData<'a, K> {
     }
     fn find_slot(&self, data_key: &K) -> Result<usize, StrErr> {
         let idx = self.keys.partition_point(|&x| x <= *data_key);
-        if self.keys[idx] == *data_key {
+        if idx < self.keys.len() && self.keys[idx] == *data_key {
             return Err(StrErr::new("duplicate key found"));
         }
         return Ok(idx);
@@ -525,6 +570,7 @@ where
 
 unsafe impl Pod for HeaderPage {}
 unsafe impl Zeroable for HeaderPage {}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 struct HeaderPage {
@@ -536,8 +582,8 @@ struct HeaderPage {
 unsafe impl Zeroable for HeaderPage {} */
 
 impl HeaderPage {
-    fn cast<'a>(raw: &'a mut [u8]) -> &'a mut HeaderPage {
-        try_from_bytes_mut::<HeaderPage>(&mut raw[..24]).unwrap()
+    fn cast(raw: &mut [u8]) -> &mut HeaderPage {
+        try_from_bytes_mut::<HeaderPage>(&mut raw[..size_of::<HeaderPage>()]).unwrap()
     }
 }
 
@@ -570,30 +616,210 @@ iota! {
 pub mod tests {
     use super::*;
     use crate::bpm::PAGE_SIZE;
+    use crate::{bpm::DiskManager, replacer::LRURepl};
     use bytemuck::Pod;
+    // use core::fmt::Formatter;
     use rand::{thread_rng, Rng, RngCore};
+    use std::fmt::Formatter;
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempfile;
 
-    #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Default)]
+    #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Default)]
     struct KeyT {
         main: i64,
         sub: i64,
     }
-
-    /* #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-    struct ValT {
-        key: KeyT,
-        val: KeyT,
+    impl Debug for KeyT {
+        fn fmt(&self, fmt: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+            fmt.write_str(format!("{}-{}", self.main, self.sub).as_str())
+        }
     }
-    impl DBType for ValT {}
+    impl Into<KeyT> for i64 {
+        fn into(self) -> KeyT {
+            KeyT { main: self, sub: 0 }
+        }
+    }
+    pub trait Into2<T>: Sized {
+        fn into2(self) -> T;
+    }
 
-    unsafe impl Pod for ValT {}
-    unsafe impl Zeroable for ValT {} */
+    impl<T: Into<KeyT>> Into2<Vec<KeyT>> for Vec<T> {
+        fn into2(self) -> Vec<KeyT> {
+            self.into_iter().map(|k| k.into()).collect()
+        }
+    }
+
+    /* impl From<i64> for KeyT {
+        fn from(i: i64) -> Self {
+            KeyT { main: i, sub: 0 }
+        }
+    } */
 
     unsafe impl Pod for KeyT {}
     unsafe impl Zeroable for KeyT {}
     impl DBType for KeyT {}
+    fn make_tree_key(input: &[i64]) -> Vec<KeyT> {
+        let mut ret = vec![];
+        for i in input {
+            ret.push(KeyT { main: *i, sub: 0 });
+        }
+        ret
+    }
+    fn make_tree_val(input: &[i64]) -> Vec<Val<KeyT, KeyT>> {
+        let mut ret = vec![];
+        for item in input {
+            let temp = KeyT {
+                main: *item,
+                sub: 0,
+            };
+            ret.push(Val {
+                key: temp,
+                val: temp,
+            });
+        }
+        ret
+    }
+    fn sequential_until(last: i64) -> Vec<KeyT> {
+        let mut ret = vec![];
+        for i in 1..=last {
+            ret.push(KeyT { main: i, sub: 0 });
+        }
+        ret
+    }
+    fn inverted_sequential_until(last: i64) -> Vec<KeyT> {
+        let mut ret = vec![];
+        for i in (1..=last).rev() {
+            ret.push(KeyT { main: i, sub: 0 });
+        }
+        ret
+    }
+
+    #[test]
+    #[cfg(feature = "testing")]
+    fn test_insert() {
+        #[cfg(feature = "testing")]
+        {
+            // only for #[cfg]
+            use parking_lot::deadlock;
+            use std::thread;
+            use std::time::Duration;
+
+            // Create a background thread which checks for deadlocks every 10s
+            thread::spawn(move || loop {
+                thread::sleep(Duration::from_secs(2));
+                let deadlocks = deadlock::check_deadlock();
+                if deadlocks.is_empty() {
+                    continue;
+                }
+
+                println!("{} deadlocks detected", deadlocks.len());
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    println!("Deadlock #{}", i);
+                    for t in threads {
+                        println!("Thread Id {:#?}", t.thread_id());
+                        println!("{:#?}", t.backtrace());
+                    }
+                }
+            });
+        }
+        let max_size = 10;
+        struct Testcase {
+            insertions: Vec<KeyT>,
+            root_keys: Vec<KeyT>,
+            leaf_vals: Vec<&'static [i64]>,
+            node_size: i64,
+        }
+        let tcases: Vec<Testcase> = vec![
+            Testcase {
+                node_size: 3,
+                insertions: inverted_sequential_until(10),
+                root_keys: make_tree_key(&[7]),
+                leaf_vals: vec![&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(6),
+                root_keys: vec![3].into2(),
+                leaf_vals: vec![&[1], &[2], &[3], &[4], &[5, 6]],
+            },
+            Testcase {
+                node_size: 4,
+                insertions: make_tree_key(&[1, 3, 5, 9, 10]),
+                root_keys: vec![5].into2(),
+                leaf_vals: vec![&[1, 3], &[5, 9, 10]],
+            },
+            Testcase {
+                node_size: 7,
+                insertions: sequential_until(13),
+                root_keys: vec![4, 7, 10].into2(),
+                leaf_vals: vec![&[1, 2, 3], &[4, 5, 6], &[7, 8, 9], &[10, 11, 12, 13]],
+            },
+        ];
+        for case in tcases {
+            let some_file = tempfile().unwrap();
+            let repl = LRURepl::new(max_size);
+            let dm = DiskManager::new_from_file(some_file, PAGE_SIZE as u64);
+            let bpm = BufferPoolManager::new(max_size, repl, dm);
+
+            let mut some_tree: Tree<_, KeyT, KeyT> =
+                Tree::new(&bpm, case.node_size).expect("can't create new tree");
+
+            for insertion in case.insertions {
+                some_tree
+                    .insert(insertion, insertion)
+                    .expect(format!("failed to insert item {:?}", insertion).as_str());
+            }
+            let left_most = KeyT { main: -1, sub: 0 };
+            let mut acc = some_tree
+                ._search_leaf(&left_most)
+                .expect("unable to search left most leaf");
+            let left_most_node = acc.pop_next().expect("not expect returning none");
+            let mut cur_page_id = left_most_node.origin.get_page_id();
+            acc.add_flush(left_most_node);
+            some_tree
+                ._return_access_to_bpm(acc)
+                .expect("err during flushing access obj");
+
+            let mut root_latch = some_tree._get_root().expect("failed to get root");
+            let root_branch = root_latch._mapped.data.branch();
+            assert!(
+                root_branch
+                    .keys
+                    .iter()
+                    .zip(case.root_keys.iter())
+                    .all(|(a, b)| a == b),
+                "root keys not match expect {:?} really {:?}",
+                case.root_keys,
+                root_branch.keys
+            );
+            let st: Vec<OwningHandle<Arc<Mutex<Frame>>, MutexGuard<Frame>>> =
+                vec![root_latch].into_iter().map(|l| l.origin).collect();
+            some_tree
+                .bpm
+                .batch_flush(st.into_iter())
+                .expect("failed to batch flush root page");
+            // assert.Equal(t, tc.rootKeys, root.keys[:root.size])
+
+            for (idx, raw_node_val) in case.leaf_vals.iter().enumerate() {
+                let typed_node_val = make_tree_val(*raw_node_val);
+                let mut page_latch = some_tree
+                    ._get_page(cur_page_id)
+                    .expect(format!("failed to get page {:?}", cur_page_id).as_str());
+                let real_node_val = &page_latch._mapped.data.leaf().data;
+                assert!(
+                    typed_node_val
+                        .iter()
+                        .zip(real_node_val.iter())
+                        .all(|(a, b)| a == b),
+                    "case {:?} failed keys slices are not equal expect {:?} vs real {:?}",
+                    idx,
+                    typed_node_val,
+                    real_node_val,
+                );
+                cur_page_id = page_latch._mapped.header.next;
+            }
+        }
+    }
 
     #[test]
     fn test_bin_search() {
@@ -603,30 +829,54 @@ pub mod tests {
             keys.push(KeyT { main: i, sub: 0 });
             children.push(i);
         }
+        #[derive(Debug)]
+        struct Suite {
+            key: Vec<KeyT>,
+            children: Vec<i64>,
+            search_key: i64,
+            expect_index: usize,
+        }
+        let mut test_case = vec![
+            Suite {
+                key: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9].into2(),
+                children: vec![0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                search_key: 0,
+                expect_index: 1,
+            },
+            Suite {
+                key: vec![2].into2(),
+                children: vec![1, 2],
+                search_key: 4,
+                expect_index: 1,
+            },
+        ];
 
         // vector from 0..9
 
         // (size of slice, search key, expect index returned)
-        let suites = vec![(9, 0, 1), (9, -1, 0), (9, 9, 9)];
-        for item in &suites {
+        // let suites = vec![(9, 0, 1), (9, -1, 0), (9, 9, 9)];
+        for case in &mut test_case {
+            let keys = &mut case.key;
+            let length = keys.len();
+            let children = &mut case.children;
             let branch = BranchData {
-                keys: SliceVec::from_slice_len(&mut keys[..], item.0 as usize),
-                children: SliceVec::from_slice_len(&mut children[..], item.0 as usize + 1),
+                keys: SliceVec::from_slice_len(&mut keys[..], length),
+                children: SliceVec::from_slice_len(&mut children[..], length + 1),
             };
-            let header = PageHeader {
+            /* let header = PageHeader {
                 is_deleted: false,
                 is_leaf: false,
                 _padding2: [0; 6],
                 level: 0,
-                size: item.0,
+                size: length as i64,
                 next: 0,
-            };
+            }; */
 
             let ret = branch.find_next_child(&KeyT {
-                main: item.1,
+                main: case.search_key,
                 sub: 0,
             });
-            assert_eq!(item.2, ret, "failed at item {:?}", item);
+            assert_eq!(case.expect_index, ret, "failed at item {:?}", case);
         }
     }
 
