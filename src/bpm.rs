@@ -39,16 +39,32 @@ where
         &self,
         item: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'a, Frame>>,
     ) -> Result<(), StrErr> {
-        panic!("TODO");
+        return BufferPool::delete_page_locked(&self.bp, item);
     }
 
     pub fn fetch_page(&self, page_id: PageID) -> Result<Arc<Mutex<Frame>>, StrErr> {
         BufferPool::fetch_page(&self.bp, &self.dm, page_id)
     }
 
+    #[cfg(feature = "testing")]
+    pub fn assert_clean_frame(&self) {
+        let mu = self.bp.lock();
+        let mut frames = mu.frames.borrow_mut();
+        for f in frames.iter_mut() {
+            let locked_fr = f.lock();
+            let frame_id = locked_fr.id;
+            let page_id = locked_fr.page_id;
+            assert_eq!(
+                0, locked_fr.pin_count,
+                "err at frame {} with page_id {}: want 0 pin count, has {}",
+                frame_id, page_id, locked_fr.pin_count
+            );
+        }
+    }
+
     // caller must previously acquire latches of frames, not
     // it return the latches in batch
-    pub fn batch_flush<'a>(
+    pub fn batch_unpin_flush<'a>(
         &self,
         items: impl Iterator<Item = OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'a, Frame>>>,
     ) -> Result<(), StrErr> {
@@ -335,6 +351,24 @@ where
         dm: &DiskManager,
     ) -> Result<(), StrErr> {
         dm.write_from_frame_to_file(page_id, &mut locked.raw_data[..])?;
+        Ok(())
+    }
+
+    // TODO: mark this page_id inside some reuseable page allocator
+    // + add deleted flag for future page fetch
+    fn delete_page_locked<'op>(
+        mu: &Mutex<BufferPool<R>>,
+        mut locked: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'op, Frame>>,
+    ) -> Result<(), StrErr> {
+        let b = mu.lock();
+        locked.pin_count -= 1;
+        locked.dirty = false;
+        if locked.pin_count == 0 {
+            b.replacer.borrow().unpin(locked.id);
+        } else {
+            panic!("Some other thread is hold an arc to a deleted page, need to handle this logic here")
+        }
+        drop(b);
         Ok(())
     }
 

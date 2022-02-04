@@ -1,0 +1,5 @@
+cargo test ... > some bin
+rr record somebin 
+rr replay -d rust-gdb -s 8081
+launch vscode
+

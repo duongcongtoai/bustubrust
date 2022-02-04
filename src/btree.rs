@@ -8,7 +8,7 @@ use iota::iota;
 use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
 use std::fmt::Debug;
-use std::iter::once;
+use std::iter::{once, Extend};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -327,23 +327,29 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         }
         return Ok(acc);
     }
-    fn _return_access_to_bpm<'op>(&self, acc: Access<'op, K, V>) -> Result<(), StrErr> {
+    fn _return_access_to_bpm<'op>(&self, mut acc: Access<'op, K, V>) -> Result<(), StrErr> {
         let bpm = self.bpm;
         let h_lock = self.h_lock.clone();
 
         let untouched = acc.bread_crumbs.into_iter().map(|x| x.origin);
+
+        if let Some(latch) = acc.temp {
+            acc.to_clean.push(latch);
+        }
+
         let flush_unpins = acc.to_clean.into_iter().map(|x| x.origin);
         let total_flushed = untouched.chain(flush_unpins);
-        if let Some(latch) = acc.temp {
-            total_flushed.chain(once(latch.origin));
-        }
-        bpm.batch_flush(total_flushed)
+
+        bpm.batch_unpin_flush(total_flushed)
             .expect("failed flushing in batch");
         if acc.flush_head {
             let mut locked = h_lock.lock();
             bpm.flush_locked(&mut locked)
                 .expect("failed to flush header page");
         }
+
+        #[cfg(feature = "testing")]
+        self.bpm.assert_clean_frame();
         Ok(())
     }
 
@@ -363,6 +369,9 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         let is_leaf = current_node.header.is_leaf;
         let parent_branch = parent.data.branch();
         // if current node has a right cousin
+        if current_node_idx == 0 {
+            return Ok(false);
+        }
         if current_node_idx < parent_branch.children.len() - 1 {
             let right_cousin_id = parent_branch.children[current_node_idx - 1];
             let mut right_cousin_latch = self._get_page(right_cousin_id)?;
@@ -506,7 +515,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 self._merge_node_right_to_left(
                     &mut acc,
                     &mut parent_latch._mapped,
-                    ref_idx - 1,
+                    ref_idx,
                     node_page,
                     right_page_latch,
                 )?;
@@ -899,7 +908,114 @@ pub mod tests {
     }
 
     #[test]
-    #[cfg(feature = "testing")]
+    fn test_delete() {
+        let max_size = 10;
+        struct Testcase {
+            insertions: Vec<KeyT>,
+            deletions: Vec<KeyT>,
+            root_keys: Vec<KeyT>,
+            leaf_vals: Vec<&'static [i64]>,
+            node_size: i64,
+        }
+        let tcases: Vec<Testcase> = vec![
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(5),
+                deletions: vec![2].into2(),
+                root_keys: make_tree_key(&[3, 4]),
+                leaf_vals: vec![&[1], &[3], &[4, 5]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(3),
+                deletions: vec![2, 1].into2(),
+                root_keys: vec![3].into2(),
+                leaf_vals: vec![&[3]],
+            },
+            /* Testcase {
+                node_size: 4,
+                insertions: make_tree_key(&[1, 3, 5, 9, 10]),
+                root_keys: vec![5].into2(),
+                leaf_vals: vec![&[1, 3], &[5, 9, 10]],
+            },
+            Testcase {
+                node_size: 7,
+                insertions: sequential_until(13),
+                root_keys: vec![4, 7, 10].into2(),
+                leaf_vals: vec![&[1, 2, 3], &[4, 5, 6], &[7, 8, 9], &[10, 11, 12, 13]],
+            }, */
+        ];
+        for case in tcases {
+            let some_file = tempfile().unwrap();
+            let repl = LRURepl::new(max_size);
+            let dm = DiskManager::new_from_file(some_file, PAGE_SIZE as u64);
+            let bpm = BufferPoolManager::new(max_size, repl, dm);
+
+            let mut some_tree: Tree<_, KeyT, KeyT> =
+                Tree::new(&bpm, case.node_size).expect("can't create new tree");
+
+            for insertion in case.insertions {
+                some_tree
+                    .insert(insertion, insertion)
+                    .expect(format!("failed to insert item {:?}", insertion).as_str());
+            }
+            for deletion in case.deletions {
+                some_tree
+                    .delete(deletion)
+                    .expect(format!("failed to delete key {:?}", deletion).as_str());
+            }
+            let left_most = KeyT { main: -1, sub: 0 };
+            let mut acc = some_tree
+                ._search_leaf(&left_most)
+                .expect("unable to search left most leaf");
+            let left_most_node = acc.pop_next().expect("not expect returning none");
+            let mut cur_page_id = left_most_node.origin.get_page_id();
+            acc.add_flush(left_most_node);
+            some_tree
+                ._return_access_to_bpm(acc)
+                .expect("err during flushing access obj");
+
+            let mut root_latch = some_tree._get_root().expect("failed to get root");
+            let root_branch = root_latch._mapped.data.branch();
+            assert!(
+                case.root_keys
+                    .iter()
+                    .zip(root_branch.keys.iter())
+                    .all(|(a, b)| a == b),
+                "root keys not match: expect {:?}, has {:?}",
+                case.root_keys,
+                root_branch.keys
+            );
+            let st: Vec<OwningHandle<Arc<Mutex<Frame>>, MutexGuard<Frame>>> =
+                vec![root_latch].into_iter().map(|l| l.origin).collect();
+            some_tree
+                .bpm
+                .batch_unpin_flush(st.into_iter())
+                .expect("failed to batch flush root page");
+            // assert.Equal(t, tc.rootKeys, root.keys[:root.size])
+
+            for (idx, raw_node_val) in case.leaf_vals.iter().enumerate() {
+                let typed_node_val = make_tree_val(*raw_node_val);
+                let mut page_latch = some_tree
+                    ._get_page(cur_page_id)
+                    .expect(format!("failed to get page {:?}", cur_page_id).as_str());
+                let real_node_val = &page_latch._mapped.data.leaf().data;
+                assert!(
+                    typed_node_val
+                        .iter()
+                        .zip(real_node_val.iter())
+                        .all(|(a, b)| a == b),
+                    "case {:?} failed keys slices are not equal expect {:?} vs real {:?}",
+                    idx,
+                    typed_node_val,
+                    real_node_val,
+                );
+                cur_page_id = page_latch._mapped.header.next;
+            }
+        }
+    }
+
+    #[test]
     fn test_insert() {
         #[cfg(feature = "testing")]
         {
@@ -936,6 +1052,18 @@ pub mod tests {
         let tcases: Vec<Testcase> = vec![
             Testcase {
                 node_size: 3,
+                insertions: sequential_until(4),
+                root_keys: make_tree_key(&[2, 3]),
+                leaf_vals: vec![&[1], &[2], &[3, 4]],
+            },
+            /* Testcase {
+                node_size: 3,
+                insertions: sequential_until(3),
+                root_keys: make_tree_key(&[2]),
+                leaf_vals: vec![&[1], &[2, 3]],
+            }, */
+            /* Testcase {
+                node_size: 3,
                 insertions: inverted_sequential_until(10),
                 root_keys: make_tree_key(&[7]),
                 leaf_vals: vec![&[1, 2], &[3, 4], &[5, 6], &[7, 8], &[9, 10]],
@@ -957,7 +1085,7 @@ pub mod tests {
                 insertions: sequential_until(13),
                 root_keys: vec![4, 7, 10].into2(),
                 leaf_vals: vec![&[1, 2, 3], &[4, 5, 6], &[7, 8, 9], &[10, 11, 12, 13]],
-            },
+            }, */
         ];
         for case in tcases {
             let some_file = tempfile().unwrap();
@@ -973,6 +1101,10 @@ pub mod tests {
                     .insert(insertion, insertion)
                     .expect(format!("failed to insert item {:?}", insertion).as_str());
             }
+
+            #[cfg(feature = "testing")]
+            some_tree.bpm.assert_clean_frame();
+
             let left_most = KeyT { main: -1, sub: 0 };
             let mut acc = some_tree
                 ._search_leaf(&left_most)
@@ -987,10 +1119,9 @@ pub mod tests {
             let mut root_latch = some_tree._get_root().expect("failed to get root");
             let root_branch = root_latch._mapped.data.branch();
             assert!(
-                root_branch
-                    .keys
+                case.root_keys
                     .iter()
-                    .zip(case.root_keys.iter())
+                    .zip(root_branch.keys.iter())
                     .all(|(a, b)| a == b),
                 "root keys not match expect {:?} really {:?}",
                 case.root_keys,
@@ -1000,7 +1131,7 @@ pub mod tests {
                 vec![root_latch].into_iter().map(|l| l.origin).collect();
             some_tree
                 .bpm
-                .batch_flush(st.into_iter())
+                .batch_unpin_flush(st.into_iter())
                 .expect("failed to batch flush root page");
             // assert.Equal(t, tc.rootKeys, root.keys[:root.size])
 

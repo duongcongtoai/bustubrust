@@ -5,15 +5,33 @@
 	"tasks": [
 		{
 			"type": "shell",
-			"label": "cargo test build",
-			"command": "cargo",
+			"command": "./.cargo/codelldb.sh",
+			"label": "RustRR: Serve Trace",
 			"args": [
-				"test",
-				"--no-run"
+				"${input:rrtrace}",
+				"${workspaceFolder}/target/rr/${input:rrtrace}"
 			],
-			"problemMatcher": [
-				"$rustc"
-			]
-		}
-	]
+			"group" :"build",
+		},
+		{
+			"type": "shell",
+			"command": "./.cargo/codelldb2.sh",
+			"group" :"build",
+			"label": "RustRR: Build Trace",
+			"args": [
+				"insert",
+				"--features",
+				"testing"
+			],
+			"problemMatcher": []
+		},
+	],
+    "inputs": [
+        {
+            "id": "rrtrace",
+            "description": "trace id of rr compiled from cargo rr",
+            "default": "None",
+            "type": "promptString"
+        },
+    ]
 }

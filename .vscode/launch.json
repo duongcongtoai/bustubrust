@@ -9,12 +9,47 @@
 			"type": "lldb",
 			"request": "launch",
 			"program": "${workspaceFolder}/target/debug/deps/bustubrust-623ab2f20c95a6d1",
-			"args": [],
+			"args": [
+				"insert"
+			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
 			"environment": [],
 			"externalConsole": true,
 			"preLaunchTask": "cargo test build",
+		},
+		{
+			"name": "Replay",
+			"type": "lldb",
+			"request": "launch",
+			"program": "${workspaceFolder}/target/rr/bustubrust-889aa38c9616030d/mmap_hardlink_4_bustubrust-889aa38c9616030d",
+			"processCreateCommands": [
+				"gdb-remote 127.0.0.1:8081"
+			],
+			"reverseDebugging": true
+		},
+		{
+			"name": "Replay 2",
+			"type": "lldb",
+			"request": "custom",
+			"targetCreateCommands": [
+				"target create ${workspaceFolder}/target/rr/${input:rr_target}"
+			],
+			"sourceLanguages": [
+				"rust"
+			],
+			"processCreateCommands": [
+				"gdb-remote 127.0.0.1:8081"
+			],
+			"reverseDebugging": true,
 		}
-	]
+	],
+    "inputs": [
+        {
+            "id": "rr_target",
+            "description": "folder/bin file name",
+            "default": "None",
+            "type": "promptString"
+        },
+    ]
 }

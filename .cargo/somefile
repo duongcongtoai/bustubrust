@@ -1,0 +1,19 @@
+
+running 1 test
+test btree::tests::test_insert ... FAILED
+
+failures:
+
+---- btree::tests::test_insert stdout ----
+thread 'main' panicked at 'assertion failed: `(left == right)`
+  left: `0`,
+ right: `1`: err at frame 8 with page_id 1: want 0 pin count, has 1', src/bpm.rs:57:13
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    btree::tests::test_insert
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.12s
+
+cargo-rr: `rr record` exited with status exit status: 101

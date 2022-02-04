@@ -24,7 +24,6 @@ tempfile = "3.3.0"
 tinyvec = "1.5.1"
 
 [features]
-default=["testing"]
 testing=["parking_lot/deadlock_detection"]
 
 
