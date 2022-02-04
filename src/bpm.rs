@@ -47,13 +47,18 @@ where
     }
 
     #[cfg(feature = "testing")]
-    pub fn assert_clean_frame(&self) {
+    pub fn assert_clean_frame(&self, exceptions: &[i64]) {
         let mu = self.bp.lock();
         let mut frames = mu.frames.borrow_mut();
-        for f in frames.iter_mut() {
+        'loop1: for f in frames.iter_mut() {
             let locked_fr = f.lock();
             let frame_id = locked_fr.id;
             let page_id = locked_fr.page_id;
+            for item in exceptions.iter() {
+                if *item == page_id {
+                    continue 'loop1;
+                }
+            }
             assert_eq!(
                 0, locked_fr.pin_count,
                 "err at frame {} with page_id {}: want 0 pin count, has {}",
@@ -127,6 +132,8 @@ where
                 _1: [0; 7],
                 pin_count: 0,
                 raw_data: [0u8; PAGE_SIZE],
+                #[cfg(feature = "testing")]
+                last_borrower: String::new(),
             })));
             free_list.push_front(i);
         }
@@ -448,6 +455,8 @@ pub struct Frame {
     _1: [u8; 7],
     raw_data: RawData,
     pin_count: i64,
+    #[cfg(feature = "testing")]
+    last_borrower: String,
 }
 impl Frame {
     pub fn get_page_id(&self) -> i64 {
@@ -465,6 +474,8 @@ impl Frame {
             _1: [0; 7],
             pin_count: 0,
             raw_data,
+            #[cfg(feature = "testing")]
+            last_borrower: String::new(),
         }
     }
 }

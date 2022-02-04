@@ -253,6 +253,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         }
         // valid size
         if leaf_header.size < node_size {
+            acc.add_flush(written_leaf_latch);
             return Ok(acc);
         }
         let (orphan, split_key) = self
@@ -278,6 +279,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
 
                 acc.add_flush(written_leaf_latch);
                 acc.add_flush(orphan);
+                acc.add_flush(new_root);
                 return Ok(acc);
             }
         }
@@ -292,6 +294,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
             current_parent.keys.insert(idx, split_key);
             current_parent_latch._mapped.header.size += 1;
             if current_parent_latch._mapped.header.size < node_size {
+                acc.add_flush(current_parent_latch);
                 return Ok(acc);
             }
 
@@ -317,6 +320,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 self.h.root_id = new_root.origin.get_page_id();
                 acc.flush_head = true;
 
+                acc.add_flush(new_root);
                 acc.add_flush(new_orphan);
                 acc.add_flush(current_parent_latch);
                 break;
@@ -348,8 +352,6 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 .expect("failed to flush header page");
         }
 
-        #[cfg(feature = "testing")]
-        self.bpm.assert_clean_frame();
         Ok(())
     }
 
@@ -542,12 +544,18 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
 
     fn insert(&mut self, key: K, val: V) -> Result<(), StrErr> {
         let acc = self._insert_dirty(key, val).expect("failed to insert");
-        return self._return_access_to_bpm(acc);
+        let ret = self._return_access_to_bpm(acc);
+        #[cfg(feature = "testing")]
+        self.bpm.assert_clean_frame(&[0]);
+        ret
     }
 
     fn delete(&mut self, key: K) -> Result<(), StrErr> {
         let acc = self._delete_dirty(key).expect("failed to insert");
-        return self._return_access_to_bpm(acc);
+        let ret = self._return_access_to_bpm(acc);
+        #[cfg(feature = "testing")]
+        self.bpm.assert_clean_frame(&[0]);
+        ret
     }
 
     fn new(bpm: &'a BufferPoolManager<R>, node_size: i64) -> Result<Tree<'a, R, K, V>, StrErr> {
@@ -1056,13 +1064,13 @@ pub mod tests {
                 root_keys: make_tree_key(&[2, 3]),
                 leaf_vals: vec![&[1], &[2], &[3, 4]],
             },
-            /* Testcase {
+            Testcase {
                 node_size: 3,
                 insertions: sequential_until(3),
                 root_keys: make_tree_key(&[2]),
                 leaf_vals: vec![&[1], &[2, 3]],
-            }, */
-            /* Testcase {
+            },
+            Testcase {
                 node_size: 3,
                 insertions: inverted_sequential_until(10),
                 root_keys: make_tree_key(&[7]),
@@ -1085,7 +1093,7 @@ pub mod tests {
                 insertions: sequential_until(13),
                 root_keys: vec![4, 7, 10].into2(),
                 leaf_vals: vec![&[1, 2, 3], &[4, 5, 6], &[7, 8, 9], &[10, 11, 12, 13]],
-            }, */
+            },
         ];
         for case in tcases {
             let some_file = tempfile().unwrap();
@@ -1103,7 +1111,7 @@ pub mod tests {
             }
 
             #[cfg(feature = "testing")]
-            some_tree.bpm.assert_clean_frame();
+            some_tree.bpm.assert_clean_frame(&[0]);
 
             let left_most = KeyT { main: -1, sub: 0 };
             let mut acc = some_tree
