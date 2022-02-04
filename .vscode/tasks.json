@@ -19,7 +19,7 @@
 			"group" :"build",
 			"label": "RustRR: Build Trace",
 			"args": [
-				"insert",
+				"delete",
 				"--features",
 				"testing"
 			],

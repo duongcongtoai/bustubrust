@@ -8,7 +8,6 @@ use iota::iota;
 use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
 use std::fmt::Debug;
-use std::iter::{once, Extend};
 use std::marker::PhantomData;
 use std::mem::size_of;
 use std::sync::Arc;
@@ -40,7 +39,8 @@ struct Access<'a, K: DBType, V: DBType> {
     to_clean: Vec<PageLatch<'a, K, V>>,
     flush_head: bool,
     temp: Option<PageLatch<'a, K, V>>,
-    // exclusive_flush: Vec<i64>, // flush only
+    fetched_cousins: Vec<PageLatch<'a, K, V>>, // during borrowing, cousins
+                                               //may be prefetched and reuse for merge operations
 }
 
 impl<'a, K: DBType, V: DBType> Access<'a, K, V> {
@@ -52,12 +52,32 @@ impl<'a, K: DBType, V: DBType> Access<'a, K, V> {
     fn add_flush(&mut self, latch: PageLatch<'a, K, V>) {
         self.to_clean.push(latch);
     }
+
+    fn cache_fetched_cousins(&mut self, cousin_latch: PageLatch<'a, K, V>) {
+        self.fetched_cousins.push(cousin_latch);
+    }
+
+    fn find_fetched_cousin(&mut self, page_id: i64) -> Option<PageLatch<'a, K, V>> {
+        let mut found_idx = -1;
+        for (idx, cousin) in self.fetched_cousins.iter().enumerate() {
+            if cousin.origin.get_page_id() == page_id {
+                found_idx = idx as i64;
+                break;
+            }
+        }
+        if found_idx == -1 {
+            panic!("not sure if this is reachable");
+        }
+        let cousin = self.fetched_cousins.remove(found_idx as usize);
+        return Some(cousin);
+    }
 }
 impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
     fn default() -> Self {
         Access {
             bread_crumbs: vec![],
             to_clean: vec![],
+            fetched_cousins: vec![],
             temp: None,
             flush_head: false,
         }
@@ -342,7 +362,9 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         }
 
         let flush_unpins = acc.to_clean.into_iter().map(|x| x.origin);
-        let total_flushed = untouched.chain(flush_unpins);
+        let total_flushed = untouched
+            .chain(flush_unpins)
+            .chain(acc.fetched_cousins.into_iter().map(|x| x.origin));
 
         bpm.batch_unpin_flush(total_flushed)
             .expect("failed flushing in batch");
@@ -370,12 +392,11 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
     ) -> Result<bool, StrErr> {
         let is_leaf = current_node.header.is_leaf;
         let parent_branch = parent.data.branch();
-        // if current node has a right cousin
-        if current_node_idx == 0 {
-            return Ok(false);
-        }
+
+        // prefer borrowing for right cousin first, according to this
+        // https://www.cs.usfca.edu/~galles/visualization/BPlusTree.html
         if current_node_idx < parent_branch.children.len() - 1 {
-            let right_cousin_id = parent_branch.children[current_node_idx - 1];
+            let right_cousin_id = parent_branch.children[current_node_idx + 1];
             let mut right_cousin_latch = self._get_page(right_cousin_id)?;
             if right_cousin_latch._mapped.header.size > self.h.node_size / 2 {
                 //leaf
@@ -392,7 +413,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
 
                     let new_key_for_parent = right_cousin.data[0].key;
                     parent_branch.keys[current_node_idx] = new_key_for_parent;
-                    acc.add_flush(right_cousin_latch);
+                    acc.cache_fetched_cousins(right_cousin_latch);
                     return Ok(true);
                 }
 
@@ -410,11 +431,65 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 right_cousin_latch._mapped.header.size -= 1;
 
                 parent_branch.keys[current_node_idx] = new_split_key;
+
+                acc.cache_fetched_cousins(right_cousin_latch);
                 return Ok(true);
             }
+            acc.cache_fetched_cousins(right_cousin_latch);
+            return Ok(false);
         }
 
-        return Ok(false);
+        // if current node has a right cousin
+        if current_node_idx > 0 {
+            let left_cousin_id = parent_branch.children[current_node_idx - 1];
+            let mut left_cousin_latch = self._get_page(left_cousin_id)?;
+            if left_cousin_latch._mapped.header.size > self.h.node_size / 2 {
+                //leaf
+                if is_leaf {
+                    let left_cousin = left_cousin_latch._mapped.data.leaf();
+                    let left_last_key = left_cousin.data.pop().unwrap();
+                    let current_leaf = current_node.data.leaf();
+                    current_leaf
+                        .data
+                        .resize(current_leaf.data.len() + 1, left_last_key);
+                    current_leaf.data.rotate_right(1);
+
+                    current_node.header.size += 1;
+                    left_cousin_latch._mapped.header.size -= 1;
+
+                    let new_key_for_parent = current_leaf.data[0].key;
+                    parent_branch.keys[current_node_idx - 1] = new_key_for_parent;
+                    acc.cache_fetched_cousins(left_cousin_latch);
+                    return Ok(true);
+                }
+
+                //branch
+                let split_key = parent_branch.keys[current_node_idx - 1];
+                let left_cousin = left_cousin_latch._mapped.data.branch();
+                let current_branch = current_node.data.branch();
+                current_branch
+                    .keys
+                    .resize(current_branch.keys.len() + 1, split_key);
+                current_branch.keys.rotate_right(1);
+                let left_cousin_last_child = left_cousin.children.pop().unwrap();
+                let left_cousin_last_key = left_cousin.keys.pop().unwrap();
+                current_branch
+                    .children
+                    .resize(current_branch.children.len(), left_cousin_last_child);
+
+                current_node.header.size += 1;
+                left_cousin_latch._mapped.header.size -= 1;
+
+                parent_branch.keys[current_node_idx - 1] = left_cousin_last_key;
+                acc.cache_fetched_cousins(left_cousin_latch);
+                return Ok(true);
+            }
+
+            acc.cache_fetched_cousins(left_cousin_latch);
+            return Ok(false);
+        }
+
+        panic!("not reach");
     }
 
     // TODO: make this generic for leaf node and branch node
@@ -482,6 +557,8 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
             let mut node_page_latch = acc.temp.take().unwrap();
             let node_page = &mut node_page_latch._mapped;
             if node_page.header.size >= merge_threshold {
+                acc.add_flush(node_page_latch);
+                acc.add_flush(parent_latch);
                 return Ok(acc);
             }
             let current_node_id = node_page_latch.origin.get_page_id();
@@ -493,12 +570,16 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 ref_idx,
             )? {
                 // CLEAN UP and return
+                acc.add_flush(node_page_latch);
+                acc.add_flush(parent_latch);
                 return Ok(acc);
             }
             let parent_branch = parent_latch._mapped.data.branch();
             if ref_idx > 0 {
                 let left_cousin_id = parent_branch.children[ref_idx - 1];
-                let mut left_page_latch = self._get_page(left_cousin_id)?;
+
+                // let mut left_page_latch = self._get_page(left_cousin_id)?;
+                let mut left_page_latch = acc.find_fetched_cousin(left_cousin_id).unwrap();
                 self._merge_node_right_to_left(
                     &mut acc,
                     &mut parent_latch._mapped,
@@ -513,7 +594,11 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 acc.add_flush(left_page_latch);
             } else if ref_idx < parent_latch._mapped.header.size as usize {
                 let right_cousin_id = parent_branch.children[ref_idx + 1];
-                let right_page_latch = self._get_page(right_cousin_id)?;
+
+                // this caching is to avoid deadlock (with current impl)
+                // because in previous step we always fetch cousin  (with raii lock) first to find if its keys are borrowable
+                let right_page_latch = acc.find_fetched_cousin(right_cousin_id).unwrap();
+                // let right_page_latch = self._get_page(right_cousin_id)?;
                 self._merge_node_right_to_left(
                     &mut acc,
                     &mut parent_latch._mapped,
@@ -533,12 +618,20 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
                 );
             }
         }
-        if maybe_new_root != INVALID_PAGE_ID {
-            self.h.root_id = maybe_new_root;
-            acc.flush_head = true;
-            return Ok(acc);
-        }
+        let previous_parent = acc.temp.take().unwrap();
+        // hard to imagine
+        // this is a case when a root node used to be a parent, but after merge, it has no key
+        // so the previous merged node is the new root node
+        if previous_parent._mapped.header.size == 0 {
+            if maybe_new_root != INVALID_PAGE_ID {
+                self.h.root_id = maybe_new_root;
+                acc.flush_head = true;
 
+                acc.add_flush(previous_parent);
+                return Ok(acc);
+            }
+        }
+        acc.add_flush(previous_parent);
         Ok(acc)
     }
 
@@ -714,10 +807,13 @@ unsafe impl Zeroable for PageHeader {}
 
 impl<'a, K: DBType, V: DBType> LeafData<'a, K, V> {
     fn delete_with_key(&mut self, key: &K) -> Result<(), StrErr> {
-        let idx = self
-            .data
-            .binary_search_by(|&x| x.key.cmp(key))
-            .expect("failed to binary search at index");
+        let idx = self.data.binary_search_by(|&x| x.key.cmp(key)).expect(
+            format!(
+                "failed to binary search at index {:?} with key {:?}",
+                self.data, key,
+            )
+            .as_str(),
+        );
         self.data.remove(idx);
         Ok(())
     }
@@ -840,7 +936,7 @@ pub mod tests {
     use crate::{bpm::DiskManager, replacer::LRURepl};
     use bytemuck::Pod;
     // use core::fmt::Formatter;
-    use rand::{thread_rng, Rng, RngCore};
+    use rand::{seq, thread_rng, Rng, RngCore};
     use std::fmt::Formatter;
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempfile;
@@ -917,6 +1013,7 @@ pub mod tests {
 
     #[test]
     fn test_delete() {
+        _check_deadlock();
         let max_size = 10;
         struct Testcase {
             insertions: Vec<KeyT>,
@@ -940,18 +1037,48 @@ pub mod tests {
                 root_keys: vec![3].into2(),
                 leaf_vals: vec![&[3]],
             },
-            /* Testcase {
-                node_size: 4,
-                insertions: make_tree_key(&[1, 3, 5, 9, 10]),
-                root_keys: vec![5].into2(),
-                leaf_vals: vec![&[1, 3], &[5, 9, 10]],
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(3),
+                deletions: vec![1].into2(),
+                root_keys: vec![3].into2(),
+                leaf_vals: vec![&[2], &[3]],
             },
             Testcase {
-                node_size: 7,
-                insertions: sequential_until(13),
-                root_keys: vec![4, 7, 10].into2(),
-                leaf_vals: vec![&[1, 2, 3], &[4, 5, 6], &[7, 8, 9], &[10, 11, 12, 13]],
-            }, */
+                node_size: 3,
+                insertions: inverted_sequential_until(10),
+                deletions: vec![10, 9, 8].into2(),
+                root_keys: vec![5].into2(),
+                leaf_vals: vec![&[1, 2], &[3, 4], &[5, 6], &[7]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(8),
+                deletions: vec![4].into2(),
+                root_keys: vec![3, 6].into2(),
+                leaf_vals: vec![&[1], &[2], &[3], &[5], &[6], &[7, 8]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(6),
+                deletions: vec![2].into2(),
+                root_keys: vec![4].into2(),
+                leaf_vals: vec![&[1], &[3], &[4], &[5, 6]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(5),
+                deletions: vec![5, 4, 3].into2(),
+                root_keys: vec![2].into2(),
+                leaf_vals: vec![&[1], &[2]],
+            },
+            Testcase {
+                node_size: 3,
+                insertions: sequential_until(5),
+                deletions: vec![5, 4, 3, 2].into2(),
+                root_keys: vec![1].into2(),
+                leaf_vals: vec![&[1]],
+            },
         ];
         for case in tcases {
             let some_file = tempfile().unwrap();
@@ -972,6 +1099,9 @@ pub mod tests {
                     .delete(deletion)
                     .expect(format!("failed to delete key {:?}", deletion).as_str());
             }
+            #[cfg(feature = "testing")]
+            some_tree.bpm.assert_clean_frame(&[0]);
+
             let left_most = KeyT { main: -1, sub: 0 };
             let mut acc = some_tree
                 ._search_leaf(&left_most)
@@ -984,7 +1114,34 @@ pub mod tests {
                 .expect("err during flushing access obj");
 
             let mut root_latch = some_tree._get_root().expect("failed to get root");
-            let root_branch = root_latch._mapped.data.branch();
+            match root_latch._mapped.header.is_leaf {
+                true => {
+                    let root_leaf = root_latch._mapped.data.leaf();
+                    assert!(
+                        case.root_keys
+                            .iter()
+                            .zip(root_leaf.data.iter())
+                            .all(|(a, b)| *a == b.key),
+                        "root keys not match: expect {:?}, has {:?}",
+                        case.root_keys,
+                        root_leaf.data
+                    );
+                }
+                false => {
+                    let root_branch = root_latch._mapped.data.branch();
+                    assert!(
+                        case.root_keys
+                            .iter()
+                            .zip(root_branch.keys.iter())
+                            .all(|(a, b)| a == b),
+                        "root keys not match: expect {:?}, has {:?}",
+                        case.root_keys,
+                        root_branch.keys
+                    );
+                }
+            }
+
+            /* let root_branch = root_latch._mapped.data.branch();
             assert!(
                 case.root_keys
                     .iter()
@@ -993,7 +1150,7 @@ pub mod tests {
                 "root keys not match: expect {:?}, has {:?}",
                 case.root_keys,
                 root_branch.keys
-            );
+            ); */
             let st: Vec<OwningHandle<Arc<Mutex<Frame>>, MutexGuard<Frame>>> =
                 vec![root_latch].into_iter().map(|l| l.origin).collect();
             some_tree
@@ -1023,8 +1180,7 @@ pub mod tests {
         }
     }
 
-    #[test]
-    fn test_insert() {
+    fn _check_deadlock() {
         #[cfg(feature = "testing")]
         {
             // only for #[cfg]
@@ -1050,6 +1206,10 @@ pub mod tests {
                 }
             });
         }
+    }
+
+    #[test]
+    fn test_insert() {
         let max_size = 10;
         struct Testcase {
             insertions: Vec<KeyT>,
