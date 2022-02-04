@@ -35,6 +35,13 @@ where
         BufferPool::new_page(&self.bp, dm)
     }
 
+    pub fn delete_page_locked<'a>(
+        &self,
+        item: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'a, Frame>>,
+    ) -> Result<(), StrErr> {
+        panic!("TODO");
+    }
+
     pub fn fetch_page(&self, page_id: PageID) -> Result<Arc<Mutex<Frame>>, StrErr> {
         BufferPool::fetch_page(&self.bp, &self.dm, page_id)
     }

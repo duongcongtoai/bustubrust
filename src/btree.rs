@@ -8,8 +8,8 @@ use iota::iota;
 use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
 use std::fmt::Debug;
+use std::iter::once;
 use std::marker::PhantomData;
-use std::mem::align_of;
 use std::mem::size_of;
 use std::sync::Arc;
 use tinyvec::SliceVec;
@@ -39,6 +39,7 @@ struct Access<'a, K: DBType, V: DBType> {
     bread_crumbs: Vec<PageLatch<'a, K, V>>,
     to_clean: Vec<PageLatch<'a, K, V>>,
     flush_head: bool,
+    temp: Option<PageLatch<'a, K, V>>,
     // exclusive_flush: Vec<i64>, // flush only
 }
 
@@ -47,6 +48,7 @@ impl<'a, K: DBType, V: DBType> Access<'a, K, V> {
         let ret = self.bread_crumbs.pop()?;
         return Some(ret);
     }
+
     fn add_flush(&mut self, latch: PageLatch<'a, K, V>) {
         self.to_clean.push(latch);
     }
@@ -56,6 +58,7 @@ impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
         Access {
             bread_crumbs: vec![],
             to_clean: vec![],
+            temp: None,
             flush_head: false,
         }
     }
@@ -63,7 +66,7 @@ impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
 
 #[allow(dead_code)]
 impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
-    fn _get_page<'op>(&mut self, page_id: i64) -> Result<PageLatch<'op, K, V>, StrErr> {
+    fn _get_page<'op>(&self, page_id: i64) -> Result<PageLatch<'op, K, V>, StrErr> {
         // let bpm = self.bpm;
         let root_frame = self.bpm.fetch_page(page_id)?;
 
@@ -331,6 +334,9 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         let untouched = acc.bread_crumbs.into_iter().map(|x| x.origin);
         let flush_unpins = acc.to_clean.into_iter().map(|x| x.origin);
         let total_flushed = untouched.chain(flush_unpins);
+        if let Some(latch) = acc.temp {
+            total_flushed.chain(once(latch.origin));
+        }
         bpm.batch_flush(total_flushed)
             .expect("failed flushing in batch");
         if acc.flush_head {
@@ -341,8 +347,197 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         Ok(())
     }
 
+    // We only borrow from right cousin
+    // can't borrow from left cousin, if we do, we hold the left cousin's lock
+    // and the left cousin may as well be borrowing from current node (its right cousin)
+    // which will cause deadlock
+    //
+    // PS: because we already hold the lock to the parent, previous sentence won't happen
+    fn _try_borrow_cousins_key<'op>(
+        &self,
+        acc: &mut Access<'op, K, V>,
+        parent: &mut NodePage<'op, K, V>,
+        current_node: &mut NodePage<'op, K, V>,
+        current_node_idx: usize,
+    ) -> Result<bool, StrErr> {
+        let is_leaf = current_node.header.is_leaf;
+        let parent_branch = parent.data.branch();
+        // if current node has a right cousin
+        if current_node_idx < parent_branch.children.len() - 1 {
+            let right_cousin_id = parent_branch.children[current_node_idx - 1];
+            let mut right_cousin_latch = self._get_page(right_cousin_id)?;
+            if right_cousin_latch._mapped.header.size > self.h.node_size / 2 {
+                //leaf
+                if is_leaf {
+                    let right_cousin = right_cousin_latch._mapped.data.leaf();
+                    let right_first = right_cousin.data[0];
+                    let current_leaf = current_node.data.leaf();
+
+                    current_leaf.data.push(right_first);
+                    current_node.header.size += 1;
+
+                    right_cousin.data.remove(0);
+                    right_cousin_latch._mapped.header.size -= 1;
+
+                    let new_key_for_parent = right_cousin.data[0].key;
+                    parent_branch.keys[current_node_idx] = new_key_for_parent;
+                    acc.add_flush(right_cousin_latch);
+                    return Ok(true);
+                }
+
+                //branch
+                let split_key = parent_branch.keys[current_node_idx];
+                let right_cousin = right_cousin_latch._mapped.data.branch();
+                let current_branch = current_node.data.branch();
+                current_branch.keys.push(split_key);
+                current_branch.children.push(right_cousin.children[0]);
+                current_node.header.size += 1;
+
+                let new_split_key = right_cousin.keys[0];
+                right_cousin.keys.remove(0);
+                right_cousin.children.remove(0);
+                right_cousin_latch._mapped.header.size -= 1;
+
+                parent_branch.keys[current_node_idx] = new_split_key;
+                return Ok(true);
+            }
+        }
+
+        return Ok(false);
+    }
+
+    // TODO: make this generic for leaf node and branch node
+    fn _merge_node_right_to_left<'op>(
+        &self,
+        acc: &mut Access<'op, K, V>,
+        parent: &mut NodePage<'op, K, V>,
+        idx_of_left: usize,
+        left_node: &mut NodePage<'op, K, V>,
+        right_node_latch: PageLatch<'op, K, V>,
+    ) -> Result<(), StrErr> {
+        let is_leaf = left_node.header.is_leaf;
+        if !is_leaf {
+            let mut right_node = right_node_latch._mapped;
+            let parent_branch = parent.data.branch();
+            let left_branch = left_node.data.branch();
+            let right_branch = right_node.data.branch();
+            left_branch
+                .children
+                .extend_from_slice(&right_branch.children[..]);
+            let old_split_key = parent_branch.keys[idx_of_left];
+            left_branch.keys.push(old_split_key);
+            left_branch.keys.extend_from_slice(&right_branch.keys[..]);
+            left_node.header.size += right_branch.keys.len() as i64 + 1;
+
+            parent_branch.children.remove(idx_of_left + 1);
+            parent_branch.keys.remove(idx_of_left);
+            parent.header.size -= 1;
+            self.bpm.delete_page_locked(right_node_latch.origin)?;
+            return Ok(());
+        }
+        let mut right_node = right_node_latch._mapped;
+        let parent_branch = parent.data.branch();
+        let left_leaf = left_node.data.leaf();
+        let right_leaf = right_node.data.leaf();
+        left_leaf.data.extend_from_slice(&right_leaf.data[..]);
+        left_node.header.size += right_leaf.data.len() as i64;
+        parent_branch.keys.remove(idx_of_left);
+        parent_branch.children.remove(idx_of_left + 1);
+        parent.header.size -= 1;
+
+        left_node.header.next = right_node.header.next;
+        self.bpm.delete_page_locked(right_node_latch.origin)?;
+        Ok(())
+    }
+
+    fn _delete_dirty<'op>(&mut self, key: K) -> Result<Access<'op, K, V>, StrErr> {
+        let merge_threshold = self.h.node_size / 2;
+        let mut acc = self
+            ._search_leaf(&key)
+            .expect("cannot find leaf node io insert to key");
+        let mut node_page_latch = acc.pop_next().expect("not expect to return empty");
+        let node_page = &mut node_page_latch._mapped;
+        let leaf = node_page.data.leaf();
+        leaf.delete_with_key(&key)?;
+        node_page.header.size -= 1;
+
+        let mut maybe_new_root = INVALID_PAGE_ID;
+        // let current_size = node_page.header.size;
+
+        // acc.add_flush(node_page_latch);
+        // while let Some(node_page_latch) = self._bubleup(&mut acc,)
+        acc.temp = Some(node_page_latch);
+        while let Some(mut parent_latch) = acc.pop_next() {
+            let mut node_page_latch = acc.temp.take().unwrap();
+            let node_page = &mut node_page_latch._mapped;
+            if node_page.header.size >= merge_threshold {
+                return Ok(acc);
+            }
+            let current_node_id = node_page_latch.origin.get_page_id();
+            let ref_idx = parent_latch.ref_idx;
+            if self._try_borrow_cousins_key(
+                &mut acc,
+                &mut parent_latch._mapped,
+                node_page,
+                ref_idx,
+            )? {
+                // CLEAN UP and return
+                return Ok(acc);
+            }
+            let parent_branch = parent_latch._mapped.data.branch();
+            if ref_idx > 0 {
+                let left_cousin_id = parent_branch.children[ref_idx - 1];
+                let mut left_page_latch = self._get_page(left_cousin_id)?;
+                self._merge_node_right_to_left(
+                    &mut acc,
+                    &mut parent_latch._mapped,
+                    ref_idx - 1,
+                    &mut left_page_latch._mapped,
+                    node_page_latch,
+                )?;
+
+                maybe_new_root = left_cousin_id;
+                acc.temp = Some(parent_latch);
+                // acc.add_flush(left_page_latch);
+                acc.add_flush(left_page_latch);
+            } else if ref_idx < parent_latch._mapped.header.size as usize {
+                let right_cousin_id = parent_branch.children[ref_idx + 1];
+                let right_page_latch = self._get_page(right_cousin_id)?;
+                self._merge_node_right_to_left(
+                    &mut acc,
+                    &mut parent_latch._mapped,
+                    ref_idx - 1,
+                    node_page,
+                    right_page_latch,
+                )?;
+
+                maybe_new_root = current_node_id;
+                acc.temp = Some(parent_latch);
+                // acc.add_flush(node_page_latch);
+                acc.add_flush(node_page_latch);
+            } else {
+                panic!(
+                    "should not reach here, ref_idx {:?} and parent size: {:?}",
+                    ref_idx, parent_latch._mapped.header.size
+                );
+            }
+        }
+        if maybe_new_root != INVALID_PAGE_ID {
+            self.h.root_id = maybe_new_root;
+            acc.flush_head = true;
+            return Ok(acc);
+        }
+
+        Ok(acc)
+    }
+
     fn insert(&mut self, key: K, val: V) -> Result<(), StrErr> {
         let acc = self._insert_dirty(key, val).expect("failed to insert");
+        return self._return_access_to_bpm(acc);
+    }
+
+    fn delete(&mut self, key: K) -> Result<(), StrErr> {
+        let acc = self._delete_dirty(key).expect("failed to insert");
         return self._return_access_to_bpm(acc);
     }
 
@@ -501,6 +696,15 @@ unsafe impl Pod for PageHeader {}
 unsafe impl Zeroable for PageHeader {}
 
 impl<'a, K: DBType, V: DBType> LeafData<'a, K, V> {
+    fn delete_with_key(&mut self, key: &K) -> Result<(), StrErr> {
+        let idx = self
+            .data
+            .binary_search_by(|&x| x.key.cmp(key))
+            .expect("failed to binary search at index");
+        self.data.remove(idx);
+        Ok(())
+    }
+
     fn find_slot(&self, data_key: &Val<K, V>) -> Result<usize, StrErr> {
         let idx = self.data.partition_point(|&x| x.key <= data_key.key);
         if idx < self.data.len() && self.data[idx] == *data_key {
