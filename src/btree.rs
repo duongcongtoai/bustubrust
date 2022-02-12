@@ -377,12 +377,10 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         Ok(())
     }
 
-    // We only borrow from right cousin
-    // can't borrow from left cousin, if we do, we hold the left cousin's lock
-    // and the left cousin may as well be borrowing from current node (its right cousin)
-    // which will cause deadlock
-    //
-    // PS: because we already hold the lock to the parent, previous sentence won't happen
+    // Borrowing from cousins may cause deadlock, because there can be and scan leaf operation
+    // going on.
+    // TODO: make _get_page acquire a lock with retry mode
+    // Reference (Improved Latch Crabbing Protocol): https://15445.courses.cs.cmu.edu/fall2021/notes/08-indexconcurrency.pdf
     fn _try_borrow_cousins_key<'op>(
         &self,
         acc: &mut Access<'op, K, V>,
