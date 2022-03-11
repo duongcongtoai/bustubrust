@@ -9,7 +9,7 @@ use serde_derive::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 pub trait Executor<T: Transaction> {
-    fn execute(self: Box<Self>, txn: &mut T) -> Result<ResultSet>;
+    fn next(self: Box<Self>, txn: &mut T) -> Result<ResultSet>;
 }
 
 impl<T: Transaction + 'static> dyn Executor<T> {
@@ -146,7 +146,7 @@ pub enum DataType {
 }
 
 impl<T: Transaction> Executor<T> for Nothing {
-    fn execute(self: Box<Self>, _: &mut T) -> Result<ResultSet> {
+    fn next(self: Box<Self>, _: &mut T) -> Result<ResultSet> {
         Ok(ResultSet::Query {
             columns: Vec::new(),
             rows: Box::new(std::iter::once(Ok(Row::new()))),

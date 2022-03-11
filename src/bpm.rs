@@ -5,6 +5,7 @@ use parking_lot::{Mutex, MutexGuard};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::marker::PhantomData;
 use std::os::unix::fs::OpenOptionsExt;
 // use std::fs::Metadata;
 use std::sync::Arc;
@@ -17,6 +18,24 @@ pub struct BufferPoolManager<R: Replacer> {
     bp: Mutex<BufferPool<R>>,
     pub dm: DiskManager,
 }
+/* struct AutoDropFrame<F: Fn(BufferPoolManager<R>), R>
+where
+    R: Replacer,
+{
+    arc: Arc<Mutex<Frame>>,
+    drop_func: F,
+    r: PhantomData<R>,
+}
+
+impl<F, R> Drop for AutoDropFrame<F, R>
+where
+    F: Fn(BufferPoolManager<R>),
+    R: Replacer,
+{
+    fn drop(&mut self) {
+        todo!()
+    }
+} */
 
 impl<R> BufferPoolManager<R>
 where

@@ -1,3 +1,4 @@
+//TODO: manual lock/unlock is painful, try impl Drop that automatically returns the page latch to bpm
 use crate::bpm::Frame;
 use crate::bpm::INVALID_PAGE_ID;
 use crate::bpm::PAGE_SIZE;
