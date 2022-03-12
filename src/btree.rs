@@ -965,12 +965,6 @@ pub mod tests {
         }
     }
 
-    /* impl From<i64> for KeyT {
-        fn from(i: i64) -> Self {
-            KeyT { main: i, sub: 0 }
-        }
-    } */
-
     unsafe impl Pod for KeyT {}
     unsafe impl Zeroable for KeyT {}
     impl DBType for KeyT {}

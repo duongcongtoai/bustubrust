@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
@@ -86,7 +87,7 @@ impl Batch {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Row {
     pub inner: Vec<u8>,
 }
@@ -95,12 +96,6 @@ impl Row {
         Row { inner }
     }
 }
-
-/* impl Row {
-    fn key(&self) -> Vec<u8> {
-
-    }
-}  */
 
 impl HashJoiner {
     /* fn left_joined_key<'a>(self, r: &'a Row) -> &'a [u8] {
@@ -132,6 +127,7 @@ impl HashJoiner {
         if !self.built {
             self._build();
         }
+
         let mut ret = Vec::new();
         while let Some(outer_batch) = self.outer_queue.dequeue(self.p_index, self.batch_size) {
             for item in outer_batch.inner {
@@ -145,12 +141,15 @@ impl HashJoiner {
                             let mut joined_row = item.clone();
                             joined_row.inner.extend(&inner_match.inner);
                             ret.push(joined_row);
+                            if ret.len() == self.batch_size {
+                                return Some(Batch::new(ret));
+                            }
                         }
                     }
                 }
             }
         }
-        return Some(Batch { inner: ret });
+        return None;
     }
 }
 
@@ -232,7 +231,12 @@ impl GraceHashJoiner {
         }
     }
 
-    fn _new_hash_joiner(&self, p_index: usize) -> HashJoiner {
+    fn _new_hash_joiner(
+        &self,
+        p_index: usize,
+        left_key_offset: usize,
+        right_key_offset: usize,
+    ) -> HashJoiner {
         /* let p = self
         .partition_queue_inner
         .dequeue(p_index, self.batch_size)
@@ -245,8 +249,8 @@ impl GraceHashJoiner {
             inner_queue: self.partition_queue_inner.clone(),
             built: false,
             p_index,
-            left_key_offset: 1,
-            right_key_offset: 1,
+            left_key_offset,
+            right_key_offset,
         };
         return st;
     }
@@ -283,7 +287,8 @@ impl GraceHashJoiner {
                 self.max_size_per_partition,
                 // &mut cur_partitions,
             ) {
-                let mut inmem_joiner = self._new_hash_joiner(p_index);
+                let mut inmem_joiner =
+                    self._new_hash_joiner(p_index, self.left_key_offset, self.right_key_offset);
                 match inmem_joiner.next() {
                     None => {
                         self.undone_joining_partition = None;
@@ -477,47 +482,77 @@ pub mod tests {
     }
 
     #[test]
-    fn inmem_h_joiner() {
-        let p_index = 1;
-        let batch_size = 2;
-        let left_key_offset = 8; // first 8 bytes represents join key
-        let right_key_offset = 8;
-
-        let mut outer_rows = Vec::new();
-        for i in [1, 1, 1, 1] {
-            outer_rows.push(make_i64s_row([i]));
+    fn test_inmem_h_joiner() {
+        struct TestCase {
+            outer: Vec<i64>,
+            inner: Vec<i64>,
+            expect: Vec<Vec<i64>>,
         }
-        let mut inner_rows = Vec::new();
-        for i in [1, 2, 2, 2] {
-            inner_rows.push(make_i64s_row([i]));
-        }
+        let tcases = vec![
+            TestCase {
+                outer: vec![1, 1, 1, 1],
+                inner: vec![1, 2, 2, 2],
+                expect: vec![vec![1, 1], vec![1, 1], vec![1, 1], vec![1, 1]],
+            },
+            TestCase {
+                outer: vec![1, 2, 1, 2],
+                inner: vec![2, 1],
+                expect: vec![vec![1, 1], vec![2, 2], vec![1, 1], vec![2, 2]],
+            },
+        ];
+        for item in &tcases {
+            let p_index = 1;
+            let batch_size = 2;
+            let left_key_offset = 8; // first 8 bytes represents join key
+            let right_key_offset = 8;
 
-        let in_queue = Inmem::new();
-        let out_queue = Inmem::new();
-        in_queue.enqueue(1, inner_rows);
-        out_queue.enqueue(1, outer_rows);
-        let mut joiner = HashJoiner::new(
-            Rc::new(in_queue),
-            Rc::new(out_queue),
-            p_index,
-            batch_size,
-            left_key_offset,
-            right_key_offset,
-        );
-        let mut ret: Vec<Vec<i64>> = Vec::new();
-        // joined result should be 1,1|1,1|1,1|1,1
-        while let Some(b) = joiner.next() {
-            for row in b.data() {
-                let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
-                let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
-                ret.push(vec![joined_key, other_data]);
+            let mut outer_rows = Vec::new();
+            for i in &item.outer {
+                outer_rows.push(make_i64s_row([*i]));
             }
+            let mut inner_rows = Vec::new();
+            for i in &item.inner {
+                inner_rows.push(make_i64s_row([*i]));
+            }
+
+            let in_queue = Inmem::new();
+            let out_queue = Inmem::new();
+            in_queue.enqueue(1, inner_rows);
+            out_queue.enqueue(1, outer_rows);
+            let mut joiner = HashJoiner::new(
+                Rc::new(out_queue),
+                Rc::new(in_queue),
+                p_index,
+                batch_size,
+                left_key_offset,
+                right_key_offset,
+            );
+            let mut ret: Vec<Vec<i64>> = Vec::new();
+            // joined result should be 1,1|1,1|1,1|1,1
+            while let Some(b) = joiner.next() {
+                for row in b.data() {
+                    let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
+                    let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
+                    ret.push(vec![joined_key, other_data]);
+                }
+            }
+            // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
+
+            // println!("{:?}", ret);
+            assert_eq!(
+                item.expect.len(),
+                ret.len(),
+                "wrong number of rows returned"
+            );
+            assert!(item
+                .expect
+                .iter()
+                .zip(ret.iter())
+                .all(|(joined_row, expect_row)| is_all_the_same(
+                    joined_row.iter(),
+                    expect_row.iter()
+                )));
         }
-        let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
-        assert!(ret
-            .iter()
-            .zip(expect.iter())
-            .all(|(joined_row, expect_row)| is_all_the_same(joined_row.iter(), expect_row.iter())));
     }
 
     fn is_all_the_same<T>(left: impl Iterator<Item = T>, right: impl Iterator<Item = T>) -> bool
