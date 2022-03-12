@@ -4,9 +4,24 @@ use crate::join::grace::Row;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
+use std::rc::Rc;
 
 pub struct Inmem {
     inner: RefCell<HashMap<usize, VecDeque<Row>>>,
+}
+pub struct MemoryAllocator {
+    queues: Vec<Inmem>,
+}
+impl MemoryAllocator {
+    pub fn new() -> Self {
+        MemoryAllocator { queues: vec![] }
+    }
+
+    pub fn alloc(&mut self) -> Rc<Inmem> {
+        let new = Inmem::new();
+        let rc = Rc::new(new);
+        return rc;
+    }
 }
 impl Inmem {
     pub fn new() -> Self {

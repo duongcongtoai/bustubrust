@@ -1,3 +1,4 @@
+use libc::key_t;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -43,26 +44,27 @@ impl HashJoiner {
     }
 }
 
-struct GraceHashJoiner {
-    bucket_size: usize,
-    max_size_per_partition: usize,
-    partition_queue_inner: Rc<dyn PartitionedQueue>,
-    partition_queue_outer: Rc<dyn PartitionedQueue>,
-    batch_size: usize,
-    stack: Vec<HashMap<usize, PInfo>>,
+struct GraceHashJoiner<F>
+where
+    F: Fn() -> Rc<dyn PartitionedQueue>,
+{
+    /* partition_queue_inner: Rc<dyn PartitionedQueue>,
+    partition_queue_outer: Rc<dyn PartitionedQueue>, */
+    config: Config,
+    stack: Vec<PartitionLevel>,
     undone_joining_partition: Option<HashJoiner>,
-    // current_partition_offset: usize,
-    // NOTE: we only store partition info of inner
-    // partition_infos: HashMap<usize, PInfo>
-    left_key_offset: usize,
-    right_key_offset: usize,
+    queue_allocator: F,
+}
+struct PartitionLevel {
+    map: HashMap<usize, PInfo>,
+    outer_queue: Rc<dyn PartitionedQueue>,
+    inner_queue: Rc<dyn PartitionedQueue>,
 }
 
-// it should hold internal pools of allocatable disk
-// it memorize which partition points to which file
-// each file operation only needs enqueing (append to file), and dequeuing reading from current
-// offset
-// struct PartitionedQueue {}
+/* trait PartitionAllocator {
+    fn new() ->
+
+} */
 
 pub trait PartitionedQueue {
     fn enqueue(&self, partition_idx: usize, data: Vec<Row>);
@@ -153,6 +155,7 @@ impl HashJoiner {
     }
 }
 
+#[derive(Copy, Clone)]
 struct Config {
     bucket_size: usize,
     max_size_per_partition: usize,
@@ -165,13 +168,15 @@ struct Config {
 // right: 1,1,2,2,...10,10
 // initial partition = 2
 // max-size per partition = 2
-impl GraceHashJoiner {
+impl<F> GraceHashJoiner<F>
+where
+    F: Fn() -> Rc<dyn PartitionedQueue>,
+{
     fn partition_batch(
         queuer: &Rc<dyn PartitionedQueue>,
-        bucket_size: usize,
         b: Batch,
         partition_infos: &mut HashMap<usize, PInfo>,
-        key_offset: usize,
+        c: Config,
         is_inner: bool,
         // right_key_offset: usize,
     ) {
@@ -180,11 +185,17 @@ impl GraceHashJoiner {
             queuer = &self.partition_queue_inner;
         } */
         let mut hash_result: Vec<Vec<Row>> = Vec::new();
-        for _ in 0..bucket_size {
+        for _ in 0..c.bucket_size {
             hash_result.push(Vec::new())
         }
+
+        let key_offset = match is_inner {
+            true => c.right_key_offset,
+            false => c.left_key_offset,
+        };
+
         for item in b.inner {
-            let h = Self::hash(Self::get_key(key_offset, &item), bucket_size as u64);
+            let h = Self::hash(Self::get_key(key_offset, &item), c.bucket_size as u64);
             hash_result[h].push(item);
         }
         for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
@@ -216,10 +227,15 @@ impl GraceHashJoiner {
         &mut self,
         max_size_per_partition: usize,
         // partition_infos: &mut HashMap<usize, PInfo>,
-    ) -> Option<(usize, PInfo)> {
+    ) -> Option<(
+        usize,
+        PInfo,
+        Rc<dyn PartitionedQueue>,
+        Rc<dyn PartitionedQueue>,
+    )> {
         let mut found_index = None;
         let partition_infos = self.stack.last_mut().unwrap();
-        for (index, item) in partition_infos.iter_mut() {
+        for (index, item) in partition_infos.map.iter_mut() {
             if item.memsize <= max_size_per_partition {
                 found_index = Some(*index);
                 break;
@@ -227,15 +243,20 @@ impl GraceHashJoiner {
         }
         match found_index {
             None => None,
-            Some(index) => Some((index, partition_infos.remove(&index).unwrap())),
+            Some(index) => Some((
+                index,
+                partition_infos.map.remove(&index).unwrap(),
+                partition_infos.outer_queue.clone(),
+                partition_infos.inner_queue.clone(),
+            )),
         }
     }
 
     fn _new_hash_joiner(
         &self,
         p_index: usize,
-        left_key_offset: usize,
-        right_key_offset: usize,
+        outer_queue: Rc<dyn PartitionedQueue>,
+        inner_queue: Rc<dyn PartitionedQueue>,
     ) -> HashJoiner {
         /* let p = self
         .partition_queue_inner
@@ -243,19 +264,19 @@ impl GraceHashJoiner {
         .unwrap(); */
 
         let st = HashJoiner {
-            batch_size: self.batch_size,
+            batch_size: self.config.batch_size,
             htable: HashMap::new(),
-            outer_queue: self.partition_queue_outer.clone(),
-            inner_queue: self.partition_queue_inner.clone(),
+            outer_queue,
+            inner_queue,
             built: false,
             p_index,
-            left_key_offset,
-            right_key_offset,
+            left_key_offset: self.config.left_key_offset,
+            right_key_offset: self.config.right_key_offset,
         };
         return st;
     }
 
-    fn stack_len(&self) -> usize {
+    /* fn stack_len(&self) -> usize {
         self.stack.len()
     }
     fn stack_pop(&mut self) {
@@ -268,7 +289,7 @@ impl GraceHashJoiner {
 
     fn current_partition(&mut self) -> &mut HashMap<usize, PInfo> {
         self.stack.last_mut().unwrap()
-    }
+    } */
 
     fn next(&mut self) -> Option<Batch> {
         if let Some(inmem_joiner) = &mut self.undone_joining_partition {
@@ -282,13 +303,14 @@ impl GraceHashJoiner {
             };
         };
 
-        'recursiveloop: while self.stack_len() > 0 {
-            while let Some((p_index, _)) = self._find_next_inmem_sized_partition(
-                self.max_size_per_partition,
-                // &mut cur_partitions,
-            ) {
-                let mut inmem_joiner =
-                    self._new_hash_joiner(p_index, self.left_key_offset, self.right_key_offset);
+        'recursiveloop: while self.stack.len() > 0 {
+            while let Some((p_index, _, outer_queue, inner_queue)) = self
+                ._find_next_inmem_sized_partition(
+                    self.config.max_size_per_partition,
+                    // &mut cur_partitions,
+                )
+            {
+                let mut inmem_joiner = self._new_hash_joiner(p_index, outer_queue, inner_queue);
                 match inmem_joiner.next() {
                     None => {
                         self.undone_joining_partition = None;
@@ -304,34 +326,16 @@ impl GraceHashJoiner {
             let cur_partitions = self.stack.last_mut().unwrap();
 
             // recursive partition
-            if cur_partitions.len() > 0 {
+            if cur_partitions.map.len() > 0 {
                 // let st = cur_partitions.last_mut();
-                if let Some(next_recursive_p) = Self::recursive_partition(
-                    &self.partition_queue_outer,
-                    &self.partition_queue_inner,
-                    self.batch_size,
-                    self.bucket_size,
-                    cur_partitions,
-                ) {
+                if let Some(next_recursive_p) =
+                    Self::recursive_partition(&self.queue_allocator, self.config, cur_partitions)
+                {
                     self.stack.push(next_recursive_p);
                     continue 'recursiveloop;
                 }
-                /* for (parent_p_index, pinfo) in cur_partitions {
-                    let mut child_partitions = HashMap::new();
-                    let p_queue_outer = self.partition_queue_outer;
-                    let p_queue_inner = self.partition_queue_inner;
-                    for (idx, queuer) in [p_queue_inner, p_queue_outer].into_iter().enumerate() {
-                        while let Some(batch) = queuer.dequeue(*parent_p_index, self.batch_size) {
-                            // this will create partition
-                            self.partition_batch(idx, batch, &mut child_partitions);
-                        }
-                    }
-                    cur_partitions.remove(parent_p_index);
-                    stack.push(child_partitions);
-                    continue;
-                } */
             }
-            self.stack_pop();
+            self.stack.pop();
         }
         None
 
@@ -339,47 +343,53 @@ impl GraceHashJoiner {
         // recursively repartition.
     }
     fn recursive_partition(
-        p_queue_outer: &Rc<dyn PartitionedQueue>,
-        p_queue_inner: &Rc<dyn PartitionedQueue>,
-        batch_size: usize,
-        bucket_size: usize,
-        current_partition: &mut HashMap<usize, PInfo>,
-    ) -> Option<HashMap<usize, PInfo>> {
+        queue_allocator: &F,
+        config: Config,
+        current_partition: &mut PartitionLevel,
+    ) -> Option<PartitionLevel> {
         // let cur_partitions = self.stack.last_mut().unwrap();
         let mut ret = None;
         let mut item_remove = -1;
-        for (parent_p_index, _) in current_partition.iter_mut() {
+        for (parent_p_index, _) in current_partition.map.iter_mut() {
             let mut child_partitions = HashMap::new();
-            /* let p_queue_outer = partition_queue_outer;
-            let p_queue_inner = partition_queue_inner; */
-            while let Some(batch) = p_queue_outer.dequeue(*parent_p_index, batch_size) {
+            let new_outer_queue = queue_allocator();
+            while let Some(batch) = current_partition
+                .outer_queue
+                .dequeue(*parent_p_index, config.batch_size)
+            {
                 // this will create partition
                 Self::partition_batch(
-                    &p_queue_outer,
-                    bucket_size,
+                    &new_outer_queue,
                     batch,
                     &mut child_partitions,
-                    1,
+                    config,
                     false,
                 );
             }
-            while let Some(batch) = p_queue_inner.dequeue(*parent_p_index, batch_size) {
+            let new_inner_queue = queue_allocator();
+            while let Some(batch) = current_partition
+                .inner_queue
+                .dequeue(*parent_p_index, config.batch_size)
+            {
                 // this will create partition
                 Self::partition_batch(
-                    &p_queue_inner,
-                    bucket_size,
+                    &new_inner_queue,
                     batch,
                     &mut child_partitions,
-                    1,
+                    config,
                     false,
                 );
             }
 
-            ret = Some(child_partitions);
+            ret = Some(PartitionLevel {
+                map: child_partitions,
+                inner_queue: new_inner_queue,
+                outer_queue: new_outer_queue,
+            });
             item_remove = *parent_p_index as i64;
         }
         if item_remove != -1 {
-            current_partition.remove(&(item_remove as usize));
+            current_partition.map.remove(&(item_remove as usize));
         }
         ret
     }
@@ -388,20 +398,19 @@ impl GraceHashJoiner {
         c: Config,
         mut left: impl Iterator<Item = Batch>,
         mut right: impl Iterator<Item = Batch>,
-        outer_queue: Rc<dyn PartitionedQueue>,
-        inner_queue: Rc<dyn PartitionedQueue>,
+        queue_allocator: F,
+        /* outer_queue: Rc<dyn PartitionedQueue>,
+        inner_queue: Rc<dyn PartitionedQueue>, */
     ) -> Self {
         // let hash_result: Vec<Vec<Row>> = Vec::new();
+        //
+        let outer_queue = queue_allocator();
+        let inner_queue = queue_allocator();
         let mut joiner = GraceHashJoiner {
-            bucket_size: c.bucket_size,
-            max_size_per_partition: c.max_size_per_partition,
-            left_key_offset: c.left_key_offset,
-            right_key_offset: c.right_key_offset,
-            batch_size: c.batch_size,
-            partition_queue_outer: outer_queue,
-            partition_queue_inner: inner_queue,
+            config: c,
             stack: Vec::new(),
             undone_joining_partition: None,
+            queue_allocator,
         };
 
         // call left.Next() and right.Next()
@@ -413,21 +422,19 @@ impl GraceHashJoiner {
             match left.next() {
                 Some(left_batch) => {
                     Self::partition_batch(
-                        &joiner.partition_queue_outer,
-                        joiner.bucket_size,
+                        &outer_queue,
                         left_batch,
                         &mut first_level_partitions,
-                        joiner.left_key_offset,
+                        joiner.config,
                         false,
                     );
                     match right.next() {
                         Some(right_batch) => {
                             Self::partition_batch(
-                                &joiner.partition_queue_inner,
-                                joiner.bucket_size,
+                                &inner_queue,
                                 right_batch,
                                 &mut first_level_partitions,
-                                joiner.right_key_offset,
+                                joiner.config,
                                 true,
                             );
                             //left_batch,right_batch
@@ -439,11 +446,10 @@ impl GraceHashJoiner {
                     match right.next() {
                         Some(right_batch) => {
                             Self::partition_batch(
-                                &joiner.partition_queue_inner,
-                                joiner.bucket_size,
+                                &inner_queue,
                                 right_batch,
                                 &mut first_level_partitions,
-                                joiner.right_key_offset,
+                                joiner.config,
                                 true,
                             );
                         }
@@ -452,8 +458,13 @@ impl GraceHashJoiner {
                 }
             };
         }
+        let info = PartitionLevel {
+            map: first_level_partitions,
+            outer_queue,
+            inner_queue,
+        };
 
-        joiner.stack.push(first_level_partitions);
+        joiner.stack.push(info);
         return joiner;
     }
 
@@ -468,8 +479,11 @@ impl GraceHashJoiner {
 
 #[cfg(test)]
 pub mod tests {
-    use super::{HashJoiner, PartitionedQueue, Row};
-    use crate::join::queue::Inmem;
+    use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue, Row};
+    use crate::join::grace::Batch;
+    use crate::join::queue::{Inmem, MemoryAllocator};
+    use core::cell::RefCell;
+    use itertools::Itertools;
     use std::rc::Rc;
     use zerocopy::FromBytes;
 
@@ -479,6 +493,95 @@ pub mod tests {
             vec.extend(item.to_le_bytes());
         }
         Row::new(vec)
+    }
+    #[test]
+    fn test_grace_h_joiner() {
+        struct TestCase {
+            outer: Vec<i64>,
+            inner: Vec<i64>,
+            expect: Vec<Vec<i64>>,
+        }
+        // we expect the inner to be hashed, so we can't guarantee order of the rows returned
+        let tcases = vec![
+            TestCase {
+                outer: vec![1, 1, 1, 1],
+                inner: vec![1, 2, 2, 2],
+                expect: vec![vec![1, 1], vec![1, 1], vec![1, 1], vec![1, 1]],
+            },
+            TestCase {
+                outer: vec![1, 2, 1, 2],
+                inner: vec![2, 1],
+                expect: vec![vec![1, 1], vec![2, 2], vec![1, 1], vec![2, 2]],
+            },
+        ];
+        for item in &tcases {
+            let batch_size = 2;
+            let left_key_offset = 8; // first 8 bytes represents join key
+            let right_key_offset = 8;
+
+            let mut outer_batches = Vec::new();
+            for chunk in &item.outer.iter().chunks(batch_size) {
+                let mut rows = Vec::new();
+                for item in chunk {
+                    rows.push(make_i64s_row([*item]));
+                }
+                outer_batches.push(Batch::new(rows));
+            }
+            let mut inner_batches = Vec::new();
+            for chunk in &item.inner.iter().chunks(batch_size) {
+                let mut rows = Vec::new();
+                for item in chunk {
+                    rows.push(make_i64s_row([*item]));
+                }
+                inner_batches.push(Batch::new(rows));
+            }
+            let mut alloc = RefCell::new(MemoryAllocator::new());
+
+            /* let in_queue = Inmem::new();
+            let out_queue = Inmem::new(); */
+            /* in_queue.enqueue(1, inner_rows);
+            out_queue.enqueue(1, outer_rows); */
+            let config = Config {
+                bucket_size: 2,
+                max_size_per_partition: 2,
+                batch_size: 2,
+                left_key_offset,
+                right_key_offset,
+            };
+            let mut joiner = GraceHashJoiner::new(
+                config,
+                outer_batches.into_iter(),
+                inner_batches.into_iter(),
+                || -> Rc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
+                /* Rc::new(out_queue),
+                Rc::new(in_queue), */
+            );
+            let mut ret: Vec<Vec<i64>> = Vec::new();
+            // joined result should be 1,1|1,1|1,1|1,1
+            while let Some(b) = joiner.next() {
+                for row in b.data() {
+                    let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
+                    let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
+                    ret.push(vec![joined_key, other_data]);
+                }
+            }
+            // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
+
+            println!("{:?}", ret);
+            assert_eq!(
+                item.expect.len(),
+                ret.len(),
+                "wrong number of rows returned"
+            );
+            assert!(item
+                .expect
+                .iter()
+                .zip(ret.iter())
+                .all(|(joined_row, expect_row)| is_all_the_same(
+                    joined_row.iter(),
+                    expect_row.iter()
+                )));
+        }
     }
 
     #[test]
