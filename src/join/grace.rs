@@ -56,6 +56,7 @@ where
     queue_allocator: F,
 }
 struct PartitionLevel {
+    level: usize,
     map: HashMap<usize, PInfo>,
     outer_queue: Rc<dyn PartitionedQueue>,
     inner_queue: Rc<dyn PartitionedQueue>,
@@ -69,6 +70,7 @@ struct PartitionLevel {
 pub trait PartitionedQueue {
     fn enqueue(&self, partition_idx: usize, data: Vec<Row>);
     fn dequeue(&self, partition_idx: usize, size: usize) -> Option<Batch>;
+    fn id(&self) -> usize;
 }
 
 // struct RcDynPartitionQueue(Rc<dyn PartitionedQueue>);
@@ -106,9 +108,13 @@ impl HashJoiner {
     fn joined_key<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
         &r.inner[..key_offset]
     }
+    fn joined_data<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
+        &r.inner[key_offset..]
+    }
 
     fn _build(&mut self) {
         let htable = &mut self.htable;
+
         while let Some(batch) = self.inner_queue.dequeue(self.p_index, self.batch_size) {
             for item in batch.inner {
                 let key = Self::joined_key(self.right_key_offset, &item);
@@ -133,6 +139,7 @@ impl HashJoiner {
         let mut ret = Vec::new();
         while let Some(outer_batch) = self.outer_queue.dequeue(self.p_index, self.batch_size) {
             for item in outer_batch.inner {
+                let joined_key = Self::joined_key(self.left_key_offset, &item);
                 match self
                     .htable
                     .get(Self::joined_key(self.left_key_offset, &item))
@@ -141,7 +148,8 @@ impl HashJoiner {
                     Some(inner_matches) => {
                         for inner_match in inner_matches {
                             let mut joined_row = item.clone();
-                            joined_row.inner.extend(&inner_match.inner);
+                            let inner_data = Self::joined_data(self.right_key_offset, &inner_match);
+                            joined_row.inner.extend(inner_data);
                             ret.push(joined_row);
                             if ret.len() == self.batch_size {
                                 return Some(Batch::new(ret));
@@ -150,6 +158,9 @@ impl HashJoiner {
                     }
                 }
             }
+        }
+        if ret.len() > 0 {
+            return Some(Batch::new(ret));
         }
         return None;
     }
@@ -172,22 +183,15 @@ impl<F> GraceHashJoiner<F>
 where
     F: Fn() -> Rc<dyn PartitionedQueue>,
 {
-    fn partition_batch(
-        queuer: &Rc<dyn PartitionedQueue>,
-        b: Batch,
-        partition_infos: &mut HashMap<usize, PInfo>,
-        c: Config,
-        is_inner: bool,
-        // right_key_offset: usize,
-    ) {
-        /* let mut queuer = &self.partition_queue_outer;
-        if input_idx == 1 {
-            queuer = &self.partition_queue_inner;
-        } */
+    fn partition_batch(b: Batch, partition_infos: &mut PartitionLevel, c: Config, is_inner: bool) {
         let mut hash_result: Vec<Vec<Row>> = Vec::new();
         for _ in 0..c.bucket_size {
             hash_result.push(Vec::new())
         }
+        let queuer = match is_inner {
+            true => &partition_infos.inner_queue,
+            false => &partition_infos.outer_queue,
+        };
 
         let key_offset = match is_inner {
             true => c.right_key_offset,
@@ -198,6 +202,8 @@ where
             let h = Self::hash(Self::get_key(key_offset, &item), c.bucket_size as u64);
             hash_result[h].push(item);
         }
+        let this_level = partition_infos.level;
+
         for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
             let bucket_length = same_buckets.len();
             // let partition_idx = self.current_partition_offset + bucket_idx;
@@ -205,9 +211,9 @@ where
 
             // only care about inner input
             if is_inner {
-                match partition_infos.get_mut(&partition_idx) {
+                match partition_infos.map.get_mut(&partition_idx) {
                     None => {
-                        partition_infos.insert(
+                        partition_infos.map.insert(
                             partition_idx,
                             PInfo {
                                 memsize: bucket_length,
@@ -226,7 +232,6 @@ where
     fn _find_next_inmem_sized_partition(
         &mut self,
         max_size_per_partition: usize,
-        // partition_infos: &mut HashMap<usize, PInfo>,
     ) -> Option<(
         usize,
         PInfo,
@@ -258,11 +263,6 @@ where
         outer_queue: Rc<dyn PartitionedQueue>,
         inner_queue: Rc<dyn PartitionedQueue>,
     ) -> HashJoiner {
-        /* let p = self
-        .partition_queue_inner
-        .dequeue(p_index, self.batch_size)
-        .unwrap(); */
-
         let st = HashJoiner {
             batch_size: self.config.batch_size,
             htable: HashMap::new(),
@@ -304,11 +304,8 @@ where
         };
 
         'recursiveloop: while self.stack.len() > 0 {
-            while let Some((p_index, _, outer_queue, inner_queue)) = self
-                ._find_next_inmem_sized_partition(
-                    self.config.max_size_per_partition,
-                    // &mut cur_partitions,
-                )
+            while let Some((p_index, _, outer_queue, inner_queue)) =
+                self._find_next_inmem_sized_partition(self.config.max_size_per_partition)
             {
                 let mut inmem_joiner = self._new_hash_joiner(p_index, outer_queue, inner_queue);
                 match inmem_joiner.next() {
@@ -351,41 +348,44 @@ where
         let mut ret = None;
         let mut item_remove = -1;
         for (parent_p_index, _) in current_partition.map.iter_mut() {
-            let mut child_partitions = HashMap::new();
+            let child_partitions = HashMap::new();
+
             let new_outer_queue = queue_allocator();
+            let new_inner_queue = queue_allocator();
+            let mut new_level = PartitionLevel {
+                map: child_partitions,
+                inner_queue: new_inner_queue,
+                outer_queue: new_outer_queue,
+                level: current_partition.level + 1,
+            };
             while let Some(batch) = current_partition
                 .outer_queue
                 .dequeue(*parent_p_index, config.batch_size)
             {
                 // this will create partition
                 Self::partition_batch(
-                    &new_outer_queue,
+                    // &new_outer_queue,
                     batch,
-                    &mut child_partitions,
+                    &mut new_level,
                     config,
                     false,
                 );
             }
-            let new_inner_queue = queue_allocator();
             while let Some(batch) = current_partition
                 .inner_queue
                 .dequeue(*parent_p_index, config.batch_size)
             {
                 // this will create partition
                 Self::partition_batch(
-                    &new_inner_queue,
+                    // &new_inner_queue,
                     batch,
-                    &mut child_partitions,
+                    &mut new_level,
                     config,
                     false,
                 );
             }
 
-            ret = Some(PartitionLevel {
-                map: child_partitions,
-                inner_queue: new_inner_queue,
-                outer_queue: new_outer_queue,
-            });
+            ret = Some(new_level);
             item_remove = *parent_p_index as i64;
         }
         if item_remove != -1 {
@@ -399,11 +399,7 @@ where
         mut left: impl Iterator<Item = Batch>,
         mut right: impl Iterator<Item = Batch>,
         queue_allocator: F,
-        /* outer_queue: Rc<dyn PartitionedQueue>,
-        inner_queue: Rc<dyn PartitionedQueue>, */
     ) -> Self {
-        // let hash_result: Vec<Vec<Row>> = Vec::new();
-        //
         let outer_queue = queue_allocator();
         let inner_queue = queue_allocator();
         let mut joiner = GraceHashJoiner {
@@ -413,16 +409,18 @@ where
             queue_allocator,
         };
 
-        // call left.Next() and right.Next()
-        // until both return None, do
-        /* let maybe_left = left.next();
-        let maybe_right = right.next(); */
-        let mut first_level_partitions = HashMap::new();
+        let mut map = HashMap::new();
+        let mut first_level_partitions = PartitionLevel {
+            map,
+            outer_queue,
+            inner_queue,
+            level: 0,
+        };
         'until_drain_all: loop {
             match left.next() {
                 Some(left_batch) => {
                     Self::partition_batch(
-                        &outer_queue,
+                        // &outer_queue,
                         left_batch,
                         &mut first_level_partitions,
                         joiner.config,
@@ -431,13 +429,12 @@ where
                     match right.next() {
                         Some(right_batch) => {
                             Self::partition_batch(
-                                &inner_queue,
+                                // &inner_queue,
                                 right_batch,
                                 &mut first_level_partitions,
                                 joiner.config,
                                 true,
                             );
-                            //left_batch,right_batch
                         }
                         None => {}
                     };
@@ -446,7 +443,7 @@ where
                     match right.next() {
                         Some(right_batch) => {
                             Self::partition_batch(
-                                &inner_queue,
+                                // &inner_queue,
                                 right_batch,
                                 &mut first_level_partitions,
                                 joiner.config,
@@ -458,13 +455,8 @@ where
                 }
             };
         }
-        let info = PartitionLevel {
-            map: first_level_partitions,
-            outer_queue,
-            inner_queue,
-        };
 
-        joiner.stack.push(info);
+        joiner.stack.push(first_level_partitions);
         return joiner;
     }
 
@@ -484,34 +476,47 @@ pub mod tests {
     use crate::join::queue::{Inmem, MemoryAllocator};
     use core::cell::RefCell;
     use itertools::Itertools;
+    use std::cmp::Ordering::{self, Equal};
     use std::rc::Rc;
-    use zerocopy::FromBytes;
+    use zerocopy::{AsBytes, FromBytes};
 
-    fn make_i64s_row(a: impl IntoIterator<Item = i64>) -> Row {
+    fn make_i64s_row(item: (i64, &[u8])) -> Row {
         let mut vec = Vec::new();
-        for item in a {
-            vec.extend(item.to_le_bytes());
-        }
+        vec.extend(item.0.to_le_bytes());
+        vec.extend(item.1);
         Row::new(vec)
     }
+
+    macro_rules! make_rows {
+        // Base case:
+        ($a:expr,$b:expr) => {{
+            vec![($a, $b)]
+        }};
+        ($a:expr,$b:expr,$($rest:expr),*) => {{
+            [vec![($a,$b)],make_rows!($($rest),*)].concat()
+        }};
+    }
+
+    struct RowType(i64, Vec<u8>);
     #[test]
     fn test_grace_h_joiner() {
+        let a = make_rows!(1, b"a", 2, b"a");
         struct TestCase {
-            outer: Vec<i64>,
-            inner: Vec<i64>,
-            expect: Vec<Vec<i64>>,
+            outer: Vec<(i64, &'static str)>,
+            inner: Vec<(i64, &'static str)>,
+            expect: Vec<(i64, &'static str)>,
         }
         // we expect the inner to be hashed, so we can't guarantee order of the rows returned
         let tcases = vec![
+            /* TestCase {
+                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
+                inner: make_rows!(1, "a2", 2, "b2"),
+                expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2"),
+            }, */
             TestCase {
-                outer: vec![1, 1, 1, 1],
-                inner: vec![1, 2, 2, 2],
-                expect: vec![vec![1, 1], vec![1, 1], vec![1, 1], vec![1, 1]],
-            },
-            TestCase {
-                outer: vec![1, 2, 1, 2],
-                inner: vec![2, 1],
-                expect: vec![vec![1, 1], vec![2, 2], vec![1, 1], vec![2, 2]],
+                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
+                inner: make_rows!(1, "a2", 2, "b2", 1, "a3", 3, "c2"),
+                expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2", 1, "a1a3", 1, "c1a3"),
             },
         ];
         for item in &tcases {
@@ -523,7 +528,7 @@ pub mod tests {
             for chunk in &item.outer.iter().chunks(batch_size) {
                 let mut rows = Vec::new();
                 for item in chunk {
-                    rows.push(make_i64s_row([*item]));
+                    rows.push(make_i64s_row((item.0, item.1.as_bytes())));
                 }
                 outer_batches.push(Batch::new(rows));
             }
@@ -531,16 +536,12 @@ pub mod tests {
             for chunk in &item.inner.iter().chunks(batch_size) {
                 let mut rows = Vec::new();
                 for item in chunk {
-                    rows.push(make_i64s_row([*item]));
+                    rows.push(make_i64s_row((item.0, item.1.as_bytes())));
                 }
                 inner_batches.push(Batch::new(rows));
             }
-            let mut alloc = RefCell::new(MemoryAllocator::new());
+            let alloc = RefCell::new(MemoryAllocator::new());
 
-            /* let in_queue = Inmem::new();
-            let out_queue = Inmem::new(); */
-            /* in_queue.enqueue(1, inner_rows);
-            out_queue.enqueue(1, outer_rows); */
             let config = Config {
                 bucket_size: 2,
                 max_size_per_partition: 2,
@@ -553,35 +554,47 @@ pub mod tests {
                 outer_batches.into_iter(),
                 inner_batches.into_iter(),
                 || -> Rc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
-                /* Rc::new(out_queue),
-                Rc::new(in_queue), */
             );
-            let mut ret: Vec<Vec<i64>> = Vec::new();
+            let mut ret: Vec<(i64, Vec<u8>)> = Vec::new();
             // joined result should be 1,1|1,1|1,1|1,1
             while let Some(b) = joiner.next() {
                 for row in b.data() {
                     let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
-                    let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
-                    ret.push(vec![joined_key, other_data]);
+                    let other_data = row.inner[8..].to_vec();
+                    // let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
+                    ret.push((joined_key, other_data));
                 }
             }
             // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
-
-            println!("{:?}", ret);
-            assert_eq!(
-                item.expect.len(),
-                ret.len(),
-                "wrong number of rows returned"
-            );
-            assert!(item
+            ret.sort_by(|a, b| cmp_row(a, b));
+            let mut expect: Vec<(i64, Vec<u8>)> = item
                 .expect
                 .iter()
-                .zip(ret.iter())
-                .all(|(joined_row, expect_row)| is_all_the_same(
-                    joined_row.iter(),
-                    expect_row.iter()
-                )));
+                .map(|item| (item.0, item.1.as_bytes().to_vec()))
+                .collect();
+            expect.sort_by(|a, b| cmp_row(a, b));
+
+            assert_eq!(expect.len(), ret.len(), "wrong number of rows returned");
+            let equal = expect.iter().zip(ret.iter()).all(|(expect, real)| {
+                compare_row(expect.1.as_bytes().iter(), real.1.as_bytes().iter())
+            });
+            assert!(equal);
         }
+    }
+    fn cmp_row<A>(a: &(A, Vec<u8>), b: &(A, Vec<u8>)) -> Ordering
+    where
+        A: Ord,
+    {
+        if a.0 != b.0 {
+            return a.0.cmp(&b.0);
+        }
+        assert_eq!(a.1.len(), b.1.len());
+        for i in 0..a.1.len() {
+            if a.1[i] != b.1[i] {
+                return a.1[i].cmp(&b.1[i]);
+            }
+        }
+        Equal
     }
 
     #[test]
@@ -589,18 +602,18 @@ pub mod tests {
         struct TestCase {
             outer: Vec<i64>,
             inner: Vec<i64>,
-            expect: Vec<Vec<i64>>,
+            expect: Vec<i64>,
         }
         let tcases = vec![
             TestCase {
                 outer: vec![1, 1, 1, 1],
                 inner: vec![1, 2, 2, 2],
-                expect: vec![vec![1, 1], vec![1, 1], vec![1, 1], vec![1, 1]],
+                expect: vec![1, 1, 1, 1],
             },
             TestCase {
                 outer: vec![1, 2, 1, 2],
                 inner: vec![2, 1],
-                expect: vec![vec![1, 1], vec![2, 2], vec![1, 1], vec![2, 2]],
+                expect: vec![1, 1, 2, 2],
             },
         ];
         for item in &tcases {
@@ -611,15 +624,15 @@ pub mod tests {
 
             let mut outer_rows = Vec::new();
             for i in &item.outer {
-                outer_rows.push(make_i64s_row([*i]));
+                outer_rows.push(make_i64s_row((*i, &i.to_le_bytes()[..])));
             }
             let mut inner_rows = Vec::new();
             for i in &item.inner {
-                inner_rows.push(make_i64s_row([*i]));
+                inner_rows.push(make_i64s_row((*i, &i.to_le_bytes()[..])));
             }
 
-            let in_queue = Inmem::new();
-            let out_queue = Inmem::new();
+            let in_queue = Inmem::new(1);
+            let out_queue = Inmem::new(2);
             in_queue.enqueue(1, inner_rows);
             out_queue.enqueue(1, outer_rows);
             let mut joiner = HashJoiner::new(
@@ -630,38 +643,35 @@ pub mod tests {
                 left_key_offset,
                 right_key_offset,
             );
-            let mut ret: Vec<Vec<i64>> = Vec::new();
+            let mut ret: Vec<i64> = Vec::new();
             // joined result should be 1,1|1,1|1,1|1,1
             while let Some(b) = joiner.next() {
                 for row in b.data() {
                     let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
-                    let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
-                    ret.push(vec![joined_key, other_data]);
+                    ret.push(joined_key);
+                    // ret.push((joined_key, row.inner[8..].to_vec()));
                 }
             }
             // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
 
-            // println!("{:?}", ret);
             assert_eq!(
                 item.expect.len(),
                 ret.len(),
                 "wrong number of rows returned"
             );
-            assert!(item
+            let equal = item
                 .expect
                 .iter()
                 .zip(ret.iter())
-                .all(|(joined_row, expect_row)| is_all_the_same(
-                    joined_row.iter(),
-                    expect_row.iter()
-                )));
+                .all(|(real, expect)| real == expect);
+            assert!(equal);
         }
     }
 
-    fn is_all_the_same<T>(left: impl Iterator<Item = T>, right: impl Iterator<Item = T>) -> bool
-    where
-        T: Eq,
-    {
+    fn compare_row<'a>(
+        left: impl Iterator<Item = &'a u8>,
+        right: impl Iterator<Item = &'a u8>,
+    ) -> bool {
         left.zip(right).all(|(a, b)| a == b)
     }
 }

@@ -8,30 +8,41 @@ use std::rc::Rc;
 
 pub struct Inmem {
     inner: RefCell<HashMap<usize, VecDeque<Row>>>,
+    id: usize,
 }
 pub struct MemoryAllocator {
     queues: Vec<Inmem>,
+    cur_id: usize,
 }
 impl MemoryAllocator {
     pub fn new() -> Self {
-        MemoryAllocator { queues: vec![] }
+        MemoryAllocator {
+            queues: vec![],
+            cur_id: 0,
+        }
     }
 
     pub fn alloc(&mut self) -> Rc<Inmem> {
-        let new = Inmem::new();
+        let cur_id = self.cur_id;
+        self.cur_id += 1;
+        let new = Inmem::new(cur_id);
         let rc = Rc::new(new);
         return rc;
     }
 }
 impl Inmem {
-    pub fn new() -> Self {
+    pub fn new(id: usize) -> Self {
         Inmem {
             inner: RefCell::new(HashMap::new()),
+            id,
         }
     }
 }
 
 impl PartitionedQueue for Inmem {
+    fn id(&self) -> usize {
+        self.id
+    }
     fn enqueue(&self, partition_idx: usize, data: Vec<Row>) {
         let mut inner = self.inner.borrow_mut();
         match inner.get_mut(&partition_idx) {
