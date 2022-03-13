@@ -1,17 +1,10 @@
+#[allow(dead_code)]
 use core::fmt::Formatter;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::mem;
 use std::rc::Rc;
-use twox_hash::xxh3::{hash64, hash64_with_seed};
-use zerocopy::FromBytes;
+use twox_hash::xxh3::hash64_with_seed;
 
-struct CachePool {}
-
-impl CachePool {
-    fn next() {}
-}
 struct HashJoiner {
     outer_queue: Rc<dyn PartitionedQueue>,
     inner_queue: Rc<dyn PartitionedQueue>,
@@ -45,12 +38,12 @@ impl HashJoiner {
     }
 }
 
+// TODO: add fallback to merge join, if partition contain duplicate joined rows count
+// that takes more than inmem partition
 struct GraceHashJoiner<F>
 where
     F: Fn() -> Rc<dyn PartitionedQueue>,
 {
-    /* partition_queue_inner: Rc<dyn PartitionedQueue>,
-    partition_queue_outer: Rc<dyn PartitionedQueue>, */
     config: Config,
     stack: Vec<PartitionLevel>,
     undone_joining_partition: Option<HashJoiner>,
@@ -63,18 +56,11 @@ struct PartitionLevel {
     inner_queue: Rc<dyn PartitionedQueue>,
 }
 
-/* trait PartitionAllocator {
-    fn new() ->
-
-} */
-
 pub trait PartitionedQueue {
     fn enqueue(&self, partition_idx: usize, data: Vec<Row>);
     fn dequeue(&self, partition_idx: usize, size: usize) -> Option<Batch>;
     fn id(&self) -> usize;
 }
-
-// struct RcDynPartitionQueue(Rc<dyn PartitionedQueue>);
 
 struct PInfo {
     parent_size: usize,
@@ -98,6 +84,11 @@ impl Debug for Batch {
         Ok(())
     }
 }
+impl Debug for Row {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.write_str(&self.string_data(8))
+    }
+}
 impl Batch {
     pub fn new(r: Vec<Row>) -> Self {
         Batch { inner: r }
@@ -107,7 +98,7 @@ impl Batch {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Row {
     pub inner: Vec<u8>,
 }
@@ -200,10 +191,6 @@ struct Config {
     right_key_offset: usize,
 }
 
-// left: 1,2,3,..,10
-// right: 1,1,2,2,...10,10
-// initial partition = 2
-// max-size per partition = 2
 impl<F> GraceHashJoiner<F>
 where
     F: Fn() -> Rc<dyn PartitionedQueue>,
@@ -233,8 +220,6 @@ where
             );
             hash_result[h].push(item);
         }
-
-        let this_level = partition_infos.level;
 
         for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
             let bucket_length = same_buckets.len();
@@ -308,21 +293,6 @@ where
         return st;
     }
 
-    /* fn stack_len(&self) -> usize {
-        self.stack.len()
-    }
-    fn stack_pop(&mut self) {
-        self.stack.pop();
-    }
-
-    fn pop_partition_len(&mut self) -> usize {
-        self.stack.last_mut().unwrap().len()
-    }
-
-    fn current_partition(&mut self) -> &mut HashMap<usize, PInfo> {
-        self.stack.last_mut().unwrap()
-    } */
-
     fn next(&mut self) -> Option<Batch> {
         if let Some(inmem_joiner) = &mut self.undone_joining_partition {
             match inmem_joiner.next() {
@@ -394,27 +364,13 @@ where
                 .outer_queue
                 .dequeue(*parent_p_index, config.batch_size)
             {
-                // this will create partition
-                Self::partition_batch(
-                    // &new_outer_queue,
-                    batch,
-                    &mut new_level,
-                    config,
-                    false,
-                );
+                Self::partition_batch(batch, &mut new_level, config, false);
             }
             while let Some(batch) = current_partition
                 .inner_queue
                 .dequeue(*parent_p_index, config.batch_size)
             {
-                // this will create partition
-                Self::partition_batch(
-                    // &new_inner_queue,
-                    batch,
-                    &mut new_level,
-                    config,
-                    false,
-                );
+                Self::partition_batch(batch, &mut new_level, config, true);
             }
 
             ret = Some(new_level);
@@ -532,7 +488,6 @@ pub mod tests {
     struct RowType(i64, Vec<u8>);
     #[test]
     fn test_grace_h_joiner() {
-        let a = make_rows!(1, b"a", 2, b"a");
         struct TestCase {
             outer: Vec<(i64, &'static str)>,
             inner: Vec<(i64, &'static str)>,
@@ -540,15 +495,22 @@ pub mod tests {
         }
         // we expect the inner to be hashed, so we can't guarantee order of the rows returned
         let tcases = vec![
-            /* TestCase {
+            TestCase {
                 outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
                 inner: make_rows!(1, "a2", 2, "b2"),
                 expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2"),
-            }, */
+            },
             TestCase {
                 outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
                 inner: make_rows!(1, "a2", 2, "b2", 1, "a3", 3, "c2"),
                 expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2", 1, "a1a3", 1, "c1a3"),
+            },
+            TestCase {
+                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
+                inner: make_rows!(1, "a2", 2, "b2", 1, "a3", 3, "c2", 3, "c2", 2, "b2"),
+                expect: make_rows!(
+                    1, "a1a2", 2, "b1b2", 1, "c1a2", 1, "a1a3", 1, "c1a3", 2, "b1b2"
+                ),
             },
         ];
         for item in &tcases {
@@ -630,7 +592,7 @@ pub mod tests {
     }
 
     #[test]
-    fn test_inmem_h_joiner() {
+    fn test_inmem_joiner() {
         struct TestCase {
             outer: Vec<i64>,
             inner: Vec<i64>,
