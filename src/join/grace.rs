@@ -1,10 +1,10 @@
-use libc::key_t;
+use core::fmt::Formatter;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem;
 use std::rc::Rc;
-use twox_hash::xxh3::hash64;
+use twox_hash::xxh3::{hash64, hash64_with_seed};
 use zerocopy::FromBytes;
 
 struct CachePool {}
@@ -21,6 +21,7 @@ struct HashJoiner {
     htable: HashMap<Vec<u8>, Vec<Row>>,
     left_key_offset: usize,
     right_key_offset: usize,
+    // unfinished_batch: Option<Vec<Row>>,
 }
 impl HashJoiner {
     pub fn new(
@@ -82,6 +83,21 @@ struct PInfo {
 pub struct Batch {
     inner: Vec<Row>,
 }
+impl Debug for Batch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let st = self
+            .inner
+            .iter()
+            .map(|row| row.string_data(8))
+            .collect::<Vec<String>>()
+            .join(",");
+
+        f.write_str("{")?;
+        f.write_str(&st)?;
+        f.write_str("}")?;
+        Ok(())
+    }
+}
 impl Batch {
     pub fn new(r: Vec<Row>) -> Self {
         Batch { inner: r }
@@ -98,6 +114,9 @@ pub struct Row {
 impl Row {
     fn new(inner: Vec<u8>) -> Self {
         Row { inner }
+    }
+    pub fn string_data(&self, key_offset: usize) -> String {
+        String::from_utf8(self.inner[key_offset..].to_vec()).unwrap()
     }
 }
 
@@ -137,24 +156,30 @@ impl HashJoiner {
         }
 
         let mut ret = Vec::new();
+
         while let Some(outer_batch) = self.outer_queue.dequeue(self.p_index, self.batch_size) {
-            for item in outer_batch.inner {
+            for (idx, item) in outer_batch.inner.iter().enumerate() {
                 let joined_key = Self::joined_key(self.left_key_offset, &item);
                 match self
                     .htable
                     .get(Self::joined_key(self.left_key_offset, &item))
                 {
-                    None => continue,
+                    None => {
+                        continue;
+                    }
                     Some(inner_matches) => {
                         for inner_match in inner_matches {
                             let mut joined_row = item.clone();
                             let inner_data = Self::joined_data(self.right_key_offset, &inner_match);
                             joined_row.inner.extend(inner_data);
                             ret.push(joined_row);
-                            if ret.len() == self.batch_size {
-                                return Some(Batch::new(ret));
-                            }
                         }
+                        // TODO need to check batch_size
+                        // return all here for now
+                        // if ret.len() == self.batch_size {
+                        // self.unfinished_batch = Some(ret);
+                        // return Some(Batch::new(ret));
+                        // }
                     }
                 }
             }
@@ -198,15 +223,22 @@ where
             false => c.left_key_offset,
         };
 
+        let this_level = partition_infos.level;
+
         for item in b.inner {
-            let h = Self::hash(Self::get_key(key_offset, &item), c.bucket_size as u64);
+            let h = Self::hash(
+                Self::get_key(key_offset, &item),
+                c.bucket_size as u64,
+                this_level as u64,
+            );
             hash_result[h].push(item);
         }
+
         let this_level = partition_infos.level;
 
         for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
             let bucket_length = same_buckets.len();
-            // let partition_idx = self.current_partition_offset + bucket_idx;
+
             queuer.enqueue(partition_idx, same_buckets);
 
             // only care about inner input
@@ -460,8 +492,8 @@ where
         return joiner;
     }
 
-    fn hash(bytes: &[u8], bucket_size: u64) -> usize {
-        let ret = hash64(bytes);
+    fn hash(bytes: &[u8], bucket_size: u64, seed: u64) -> usize {
+        let ret = hash64_with_seed(bytes, seed);
         return (ret % bucket_size) as usize;
     }
     fn get_key<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
