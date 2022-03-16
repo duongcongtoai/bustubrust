@@ -52,6 +52,7 @@ where
 struct PartitionLevel {
     level: usize,
     map: HashMap<usize, PInfo>,
+    fallback_partitions: Vec<usize>,
     outer_queue: Rc<dyn PartitionedQueue>,
     inner_queue: Rc<dyn PartitionedQueue>,
 }
@@ -245,6 +246,20 @@ where
             }
         }
     }
+    fn _find_next_fallback_partition(
+        &mut self,
+    ) -> Option<(usize, Rc<dyn PartitionedQueue>, Rc<dyn PartitionedQueue>)> {
+        let partition_infos = self.stack.last_mut().unwrap();
+        if partition_infos.fallback_partitions.len() == 0 {
+            return None;
+        }
+        let p = partition_infos.fallback_partitions.pop().unwrap();
+        return Some((
+            p,
+            partition_infos.outer_queue.clone(),
+            partition_infos.inner_queue.clone(),
+        ));
+    }
 
     fn _find_next_inmem_sized_partition(
         &mut self,
@@ -321,6 +336,14 @@ where
                     }
                 }
             }
+            while let Some((p_index, outer_queue, inner_queue)) =
+                self._find_next_fallback_partition()
+            {
+                // p_index is a partition that even if partition one more time, its may not fit in
+                // memory, so we use fallback strategy like merge join instead
+                // make this fallback operation as late as possible
+                panic!("unimplemented")
+            }
 
             let cur_partitions = self.stack.last_mut().unwrap();
 
@@ -346,15 +369,17 @@ where
         config: Config,
         current_partition: &mut PartitionLevel,
     ) -> Option<PartitionLevel> {
-        // let cur_partitions = self.stack.last_mut().unwrap();
         let mut ret = None;
         let mut item_remove = -1;
-        for (parent_p_index, _) in current_partition.map.iter_mut() {
+
+        // inside the map now are large partition that needs recursive
+        for (parent_p_index, parinfo) in current_partition.map.iter_mut() {
             let child_partitions = HashMap::new();
 
             let new_outer_queue = queue_allocator();
             let new_inner_queue = queue_allocator();
             let mut new_level = PartitionLevel {
+                fallback_partitions: vec![],
                 map: child_partitions,
                 inner_queue: new_inner_queue,
                 outer_queue: new_outer_queue,
@@ -372,9 +397,26 @@ where
             {
                 Self::partition_batch(batch, &mut new_level, config, true);
             }
+            let fallbacks = vec![];
+            new_level.map.retain(|idx, item| {
+                let before_hash = parinfo.memsize as f64;
+                let after_hash = item.memsize as f64;
+                if before_hash > 0.0 {
+                    let size_decrease = 1.0 - (after_hash / before_hash);
+                    if size_decrease < 0.05 {
+                        fallbacks.push(*idx);
+                        return false;
+                    }
+                }
+                return true;
+            });
+            if fallbacks.len() > 0 {
+                new_level.fallback_partitions.extend(fallbacks);
+            }
 
             ret = Some(new_level);
             item_remove = *parent_p_index as i64;
+            break;
         }
         if item_remove != -1 {
             current_partition.map.remove(&(item_remove as usize));
@@ -397,7 +439,7 @@ where
             queue_allocator,
         };
 
-        let mut map = HashMap::new();
+        let map = HashMap::new();
         let mut first_level_partitions = PartitionLevel {
             map,
             outer_queue,
@@ -487,7 +529,7 @@ pub mod tests {
 
     struct RowType(i64, Vec<u8>);
     #[test]
-    fn test_grace_h_joiner() {
+    fn test_grace_hash_joiner() {
         struct TestCase {
             outer: Vec<(i64, &'static str)>,
             inner: Vec<(i64, &'static str)>,
@@ -607,7 +649,7 @@ pub mod tests {
             TestCase {
                 outer: vec![1, 2, 1, 2],
                 inner: vec![2, 1],
-                expect: vec![1, 1, 2, 2],
+                expect: vec![1, 2, 1, 2],
             },
         ];
         for item in &tcases {
@@ -643,10 +685,8 @@ pub mod tests {
                 for row in b.data() {
                     let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
                     ret.push(joined_key);
-                    // ret.push((joined_key, row.inner[8..].to_vec()));
                 }
             }
-            // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
 
             assert_eq!(
                 item.expect.len(),
