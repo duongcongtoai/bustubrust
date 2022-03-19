@@ -87,7 +87,6 @@ impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
 #[allow(dead_code)]
 impl<'a, K: DBType, V: DBType> Tree<'a, K, V> {
     fn _get_page<'op>(&self, page_id: i64) -> Result<PageLatch<'op, K, V>, StrErr> {
-        // let bpm = self.bpm;
         let root_frame = self.bpm.fetch_page(page_id)?;
 
         let mut guard = OwningHandle::new_with_fn(root_frame, |mutex: *const Mutex<Frame>| {
@@ -769,14 +768,19 @@ where
 
     fn cast_branch_from_blank(node_size: i64, raw: &'a mut [u8]) -> NodePage<'a, K, V> {
         let (raw_header, next) = raw.split_at_mut(32);
+        // cast header
         let header = try_from_bytes_mut::<PageHeader>(raw_header).unwrap();
         let page_data: PageData<'a, K, V>;
         header.is_leaf = false;
 
+        // branch data = keys + children
         let keys_end = node_size as usize * size_of::<K>();
         let (raw_keys, next) = next.split_at_mut(keys_end);
         let keys: &mut [K] = try_cast_slice_mut(raw_keys).unwrap();
         let keys = SliceVec::from_slice_len(keys, 0);
+        // done casting keys
+
+        // each node has (node_size+1) children
         let children_end = (node_size + 1) as usize * size_of::<i64>();
         let (raw_children, _) = next.split_at_mut(children_end);
         let children: &mut [i64] = try_cast_slice_mut(raw_children).unwrap();
@@ -865,6 +869,7 @@ impl<'a, K: Sized + Pod, V: Sized + Pod> PageData<'a, K, V> {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+// Page = PageHeader|PageData
 struct PageHeader {
     is_deleted: bool,
     is_leaf: bool,
