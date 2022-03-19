@@ -2,6 +2,8 @@ use crate::bpm::BufferPoolManager;
 use crate::sql::tx::Txn;
 use std::rc::Rc;
 
+use super::SqlResult;
+
 pub struct ExecutionContext {
     storage: Rc<dyn Storage>,
     bpm: Rc<BufferPoolManager>,
@@ -21,51 +23,51 @@ impl ExecutionContext {
         self.storage.clone()
     }
 }
-pub trait Storage {
-    fn create_table(&self) {}
-
-    fn get_table(&self) {}
+#[derive(Clone)]
+pub struct TableMeta {
+    schema: Schema,
+    name: String,
+    oid: u32,
 }
-/* class ExecutorContext {
- public:
-  /**
-   * Creates an ExecutorContext for the transaction that is executing the query.
-   * @param transaction the transaction executing the query
-   * @param catalog the catalog that the executor should use
-   * @param bpm the buffer pool manager that the executor should use
-   * @param txn_mgr the transaction manager that the executor should use
-   * @param lock_mgr the lock manager that the executor should use
-   */
-  ExecutorContext(Transaction *transaction, Catalog *catalog, BufferPoolManager *bpm, TransactionManager *txn_mgr,
-                  LockManager *lock_mgr)
-      : transaction_(transaction), catalog_{catalog}, bpm_{bpm}, txn_mgr_(txn_mgr), lock_mgr_(lock_mgr) {}
+#[derive(Clone)]
+pub struct Schema {
+    columns: Vec<Column>,
+}
+#[derive(Clone)]
+pub struct Column {
+    name: String,
+    fixed_length: usize,
+    variable_length: usize,
+    type_id: DataType,
+}
+#[derive(Clone)]
+pub enum DataType {
+    INVALID,
+    BOOL,
+    TINYINT,
+    SMALLINT,
+    INTEGER,
+    BIGINT,
+    DECIMAL,
+    VARCHAR,
+    TIMESTAMP,
+}
+pub trait Catalog {
+    fn create_table(&self, tablename: String, schema: Schema) -> SqlResult<TableMeta>;
 
-  DISALLOW_COPY_AND_MOVE(ExecutorContext);
+    fn get_table(&self, tablename: String) -> SqlResult<TableMeta>;
+}
 
-  ~ExecutorContext() = default;
+pub struct Tuple {}
+pub struct RID {
+    page_id: i32,
+    slot_num: u32,
+}
 
-  /** @return the running transaction */
-  Transaction *GetTransaction() const { return transaction_; }
-
-  /** @return the catalog */
-  Catalog *GetCatalog() { return catalog_; }
-
-  /** @return the buffer pool manager */
-  BufferPoolManager *GetBufferPoolManager() { return bpm_; }
-
-  /** @return the log manager - don't worry about it for now */
-  LogManager *GetLogManager() { return nullptr; }
-
-  /** @return the lock manager */
-  LockManager *GetLockManager() { return lock_mgr_; }
-
-  /** @return the transaction manager */
-  TransactionManager *GetTransactionManager() { return txn_mgr_; }
-
- private:
-  Transaction *transaction_;
-  Catalog *catalog_;
-  BufferPoolManager *bpm_;
-  TransactionManager *txn_mgr_;
-  LockManager *lock_mgr_;
-} */
+pub trait Storage: Catalog {
+    fn insert_tuple(&self, table: &str, tuple: Tuple, rid: RID, txn: Txn) -> SqlResult<()>;
+    fn mark_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
+    fn apply_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
+    fn get_tuple(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<Tuple>;
+    fn scan(&self, table: &str, txn: Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>>;
+}
