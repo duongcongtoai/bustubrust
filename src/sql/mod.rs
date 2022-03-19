@@ -4,10 +4,10 @@ use serde_derive::{Deserialize, Serialize};
 
 use self::exe::ExecutionContext;
 
-pub mod exe;
+mod exe;
 mod join;
 mod scan;
-pub mod tx;
+mod tx;
 
 pub struct Batch {
     inner: Vec<Row>,

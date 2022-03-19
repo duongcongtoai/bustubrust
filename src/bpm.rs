@@ -42,7 +42,6 @@ impl BufferPoolManager {
     }
 
     #[cfg(feature = "testing")]
-    // all frames have pin count = 0
     pub fn assert_clean_frame(&self, exceptions: &[i64]) {
         let mu = self.bp.lock();
         let mut frames = mu.frames.borrow_mut();
