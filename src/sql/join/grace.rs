@@ -1,7 +1,6 @@
+use crate::sql::{Batch, Row};
 #[allow(dead_code)]
-use core::fmt::Formatter;
 use std::collections::HashMap;
-use std::fmt::Debug;
 use std::rc::Rc;
 use twox_hash::xxh3::hash64_with_seed;
 
@@ -66,50 +65,6 @@ pub trait PartitionedQueue {
 struct PInfo {
     parent_size: usize,
     memsize: usize,
-}
-pub struct Batch {
-    inner: Vec<Row>,
-}
-impl Debug for Batch {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let st = self
-            .inner
-            .iter()
-            .map(|row| row.string_data(8))
-            .collect::<Vec<String>>()
-            .join(",");
-
-        f.write_str("{")?;
-        f.write_str(&st)?;
-        f.write_str("}")?;
-        Ok(())
-    }
-}
-impl Debug for Row {
-    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
-        f.write_str(&self.string_data(8))
-    }
-}
-impl Batch {
-    pub fn new(r: Vec<Row>) -> Self {
-        Batch { inner: r }
-    }
-    pub fn data(&self) -> &Vec<Row> {
-        &self.inner
-    }
-}
-
-#[derive(Clone)]
-pub struct Row {
-    pub inner: Vec<u8>,
-}
-impl Row {
-    fn new(inner: Vec<u8>) -> Self {
-        Row { inner }
-    }
-    pub fn string_data(&self, key_offset: usize) -> String {
-        String::from_utf8(self.inner[key_offset..].to_vec()).unwrap()
-    }
 }
 
 impl HashJoiner {
@@ -339,7 +294,7 @@ where
             while let Some((p_index, outer_queue, inner_queue)) =
                 self._find_next_fallback_partition()
             {
-                // p_index is a partition that even if partition one more time, its may not fit in
+                // p_index is a partition that even if partition one more time, it may not fit in
                 // memory, so we use fallback strategy like merge join instead
                 // make this fallback operation as late as possible
                 panic!("unimplemented")
@@ -397,7 +352,7 @@ where
             {
                 Self::partition_batch(batch, &mut new_level, config, true);
             }
-            let fallbacks = vec![];
+            let mut fallbacks = vec![];
             new_level.map.retain(|idx, item| {
                 let before_hash = parinfo.memsize as f64;
                 let after_hash = item.memsize as f64;
@@ -441,6 +396,7 @@ where
 
         let map = HashMap::new();
         let mut first_level_partitions = PartitionLevel {
+            fallback_partitions: vec![],
             map,
             outer_queue,
             inner_queue,
@@ -502,8 +458,8 @@ where
 #[cfg(test)]
 pub mod tests {
     use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue, Row};
-    use crate::join::grace::Batch;
-    use crate::join::queue::{Inmem, MemoryAllocator};
+    use crate::sql::join::grace::Batch;
+    use crate::sql::join::queue::{Inmem, MemoryAllocator};
     use core::cell::RefCell;
     use itertools::Itertools;
     use std::cmp::Ordering::{self, Equal};

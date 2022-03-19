@@ -17,15 +17,14 @@ use tinyvec::SliceVec;
 trait DBType: Copy + Ord + Pod + Debug + Default {}
 
 #[allow(dead_code)]
-struct Tree<'a, R, K, V>
+struct Tree<'a, K, V>
 where
-    R: Replacer,
     K: DBType,
     V: DBType,
 {
     h: &'a mut HeaderPage,
     h_lock: Arc<Mutex<Frame>>,
-    bpm: &'a BufferPoolManager<R>,
+    bpm: &'a BufferPoolManager,
     _1: PhantomData<(K, V)>,
 }
 struct PageLatch<'a, K: Pod, V: Pod> {
@@ -86,7 +85,7 @@ impl<K: DBType, V: DBType> Default for Access<'_, K, V> {
 }
 
 #[allow(dead_code)]
-impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
+impl<'a, K: DBType, V: DBType> Tree<'a, K, V> {
     fn _get_page<'op>(&self, page_id: i64) -> Result<PageLatch<'op, K, V>, StrErr> {
         // let bpm = self.bpm;
         let root_frame = self.bpm.fetch_page(page_id)?;
@@ -650,7 +649,7 @@ impl<'a, R: Replacer, K: DBType, V: DBType> Tree<'a, R, K, V> {
         ret
     }
 
-    fn new(bpm: &'a BufferPoolManager<R>, node_size: i64) -> Result<Tree<'a, R, K, V>, StrErr> {
+    fn new(bpm: &'a BufferPoolManager, node_size: i64) -> Result<Tree<'a, K, V>, StrErr> {
         if bpm.dm.file_size()? < PAGE_SIZE as u64 {
             let header_frame = bpm.new_page().expect("failed to create new page");
             let mut locked_header = header_frame.lock();
@@ -935,7 +934,7 @@ pub mod tests {
     use crate::{bpm::DiskManager, replacer::LRURepl};
     use bytemuck::Pod;
     // use core::fmt::Formatter;
-    use rand::{seq, thread_rng, Rng, RngCore};
+    use rand::{thread_rng, Rng, RngCore};
     use std::fmt::Formatter;
     use std::io::{Read, Seek, SeekFrom, Write};
     use tempfile::tempfile;
@@ -1077,9 +1076,9 @@ pub mod tests {
             let some_file = tempfile().unwrap();
             let repl = LRURepl::new(max_size);
             let dm = DiskManager::new_from_file(some_file, PAGE_SIZE as u64);
-            let bpm = BufferPoolManager::new(max_size, repl, dm);
+            let bpm = BufferPoolManager::new(max_size, Box::new(repl), dm);
 
-            let mut some_tree: Tree<_, KeyT, KeyT> =
+            let mut some_tree: Tree<KeyT, KeyT> =
                 Tree::new(&bpm, case.node_size).expect("can't create new tree");
 
             for insertion in case.insertions {
@@ -1252,9 +1251,9 @@ pub mod tests {
             let some_file = tempfile().unwrap();
             let repl = LRURepl::new(max_size);
             let dm = DiskManager::new_from_file(some_file, PAGE_SIZE as u64);
-            let bpm = BufferPoolManager::new(max_size, repl, dm);
+            let bpm = BufferPoolManager::new(max_size, Box::new(repl), dm);
 
-            let mut some_tree: Tree<_, KeyT, KeyT> =
+            let mut some_tree: Tree<KeyT, KeyT> =
                 Tree::new(&bpm, case.node_size).expect("can't create new tree");
 
             for insertion in case.insertions {

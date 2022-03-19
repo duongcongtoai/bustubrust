@@ -1,1 +1,1 @@
-pub trait Transaction {}
+pub struct Txn {}

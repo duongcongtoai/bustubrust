@@ -1,6 +1,6 @@
-use crate::join::grace::Batch;
-use crate::join::grace::PartitionedQueue;
-use crate::join::grace::Row;
+use crate::sql::join::grace::PartitionedQueue;
+use crate::sql::Batch;
+use crate::sql::Row;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;

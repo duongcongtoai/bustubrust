@@ -1,124 +1,71 @@
-mod executor;
-mod join;
-mod plan;
-mod tx;
-
-use crate::error::Result;
-use crate::sql::executor::Value;
-use crate::sql::plan::Node;
-use derivative::Derivative;
+use core::fmt::Debug;
+use core::fmt::Formatter;
 use serde_derive::{Deserialize, Serialize};
 
-#[derive(Derivative, Serialize, Deserialize)]
-#[derivative(Debug, PartialEq)]
-pub enum ResultSet {
-    // Transaction started
-    /* Begin {
-        id: u64,
-        mode: Mode,
-    },
-    // Transaction committed
-    Commit {
-        id: u64,
-    },
-    // Transaction rolled back
-    Rollback {
-        id: u64,
-    },
-    // Rows created
-    Create {
-        count: u64,
-    },
-    // Rows deleted
-    Delete {
-        count: u64,
-    },
-    // Rows updated
-    Update {
-        count: u64,
-    },
-    // Table created
-    CreateTable {
-        name: String,
-    },
-    // Table dropped
-    DropTable {
-        name: String,
-    }, */
-    // Query result
-    Query {
-        columns: ColumnLabels,
-        #[derivative(Debug = "ignore")]
-        #[derivative(PartialEq = "ignore")]
-        #[serde(skip, default = "ResultSet::empty_rows")]
-        rows: Rows,
-    },
-    ColumnedBatch(ColumnedBatch),
-    // Explain result
-    Explain(Node),
+use self::exe::ExecutionContext;
+
+mod exe;
+mod join;
+mod scan;
+mod tx;
+
+pub struct Batch {
+    inner: Vec<Row>,
 }
+impl Debug for Batch {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let st = self
+            .inner
+            .iter()
+            .map(|row| row.string_data(8))
+            .collect::<Vec<String>>()
+            .join(",");
 
-/// Column oriented batch
-#[derive(Deserialize, Serialize, PartialEq, Debug)]
-pub struct ColumnedBatch {
-    length: usize,
-    capacity: usize,
-    columns: Columns,
+        f.write_str("{")?;
+        f.write_str(&st)?;
+        f.write_str("}")?;
+        Ok(())
+    }
 }
-impl ColumnedBatch {
-    fn empty(self) -> bool {
-        self.length == 0
+impl Debug for Row {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
+        f.write_str(&self.string_data(8))
     }
-
-    fn len(self) -> usize {
-        self.length
+}
+impl Batch {
+    pub fn new(r: Vec<Row>) -> Self {
+        Batch { inner: r }
     }
-
-    fn capacity(self) -> usize {
-        self.capacity
-    }
-
-    fn width(self) -> usize {
-        self.columns.len()
-    }
-
-    fn get_column_ith_values(&self, col_number: usize) -> &Column {
-        &self.columns[col_number]
+    pub fn data(&self) -> &Vec<Row> {
+        &self.inner
     }
 }
 
-/// A row of values
-pub type Column = Vec<Value>;
+#[derive(Clone)]
+pub struct Row {
+    pub inner: Vec<u8>,
+}
+impl Row {
+    fn new(inner: Vec<u8>) -> Self {
+        Row { inner }
+    }
+    pub fn string_data(&self, key_offset: usize) -> String {
+        String::from_utf8(self.inner[key_offset..].to_vec()).unwrap()
+    }
+}
 
-/// A row iterator
-pub type Columns = Vec<Column>;
-
-/// A row of values
-pub type Row = Vec<Value>;
-
-/// A row iterator
-pub type Rows = Box<dyn Iterator<Item = Result<Row>> + Send>;
-
-/// A column (in a result set, see schema::Column for table columns)
+pub type SqlResult<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ColumnLabel {
-    pub name: Option<String>,
+pub enum Error {
+    Abort,
+    Config(String),
+    Internal(String),
+    Parse(String),
+    ReadOnly,
+    Serialization,
+    Value(String),
 }
 
-/// A set of columns
-pub type ColumnLabels = Vec<ColumnLabel>;
-
-impl ResultSet {
-    /// Creates an empty row iterator, for use by serde(default).
-    fn empty_rows() -> Rows {
-        Box::new(std::iter::empty())
-    }
-}
-
-pub struct Nothing;
-
-impl Nothing {
-    pub fn new() -> Box<Self> {
-        Box::new(Self)
-    }
+pub trait Operator {
+    fn next(&mut self, e: ExecutionContext) -> SqlResult<Batch>;
 }

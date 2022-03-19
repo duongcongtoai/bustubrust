@@ -37,9 +37,9 @@ default=["testing"]
 testing=["parking_lot/deadlock_detection"]
 
 
-[lib]
-name = "bustubrust"
-path = "src/lib.rs"
+# [lib]
+# name = "bustubrust"
+# path = "src/lib.rs"
 
 # [lib]
 # name = "playlib"
@@ -49,9 +49,9 @@ path = "src/lib.rs"
 name= "play"
 path = "play/main.rs"
 
-[[bin]]
+[lib]
 name= "bpm"
-path = "src/main.rs"
+path = "src/lib.rs"
 
 [profile.dev]
 opt-level = 0

@@ -5,43 +5,19 @@ use parking_lot::{Mutex, MutexGuard};
 use std::borrow::Borrow;
 use std::collections::HashMap;
 use std::collections::VecDeque;
-use std::marker::PhantomData;
 use std::os::unix::fs::OpenOptionsExt;
-// use std::fs::Metadata;
 use std::sync::Arc;
 use std::{
     fs::{File, OpenOptions},
-    hash::Hasher,
-    io::{copy, empty, Error, Read, Seek, SeekFrom, Write},
+    io::{copy, Error, Read, Seek, SeekFrom, Write},
 };
-pub struct BufferPoolManager<R: Replacer> {
-    bp: Mutex<BufferPool<R>>,
+pub struct BufferPoolManager {
+    bp: Mutex<BufferPool>,
     pub dm: DiskManager,
 }
-/* struct AutoDropFrame<F: Fn(BufferPoolManager<R>), R>
-where
-    R: Replacer,
-{
-    arc: Arc<Mutex<Frame>>,
-    drop_func: F,
-    r: PhantomData<R>,
-}
 
-impl<F, R> Drop for AutoDropFrame<F, R>
-where
-    F: Fn(BufferPoolManager<R>),
-    R: Replacer,
-{
-    fn drop(&mut self) {
-        todo!()
-    }
-} */
-
-impl<R> BufferPoolManager<R>
-where
-    R: Replacer,
-{
-    pub fn new(max_size: usize, r: R, dm: DiskManager) -> Self {
+impl BufferPoolManager {
+    pub fn new(max_size: usize, r: Box<dyn Replacer>, dm: DiskManager) -> Self {
         let bp = BufferPool::new(max_size, r);
         BufferPoolManager {
             bp: Mutex::new(bp),
@@ -122,13 +98,13 @@ where
     } */
 }
 
-pub struct BufferPool<R: Replacer> {
+pub struct BufferPool {
     frames: RefCell<Vec<Arc<Mutex<Frame>>>>,
     page_table: RefCell<HashMap<i64, FrameID>>,
     size: usize,
 
     meta: RefCell<PoolMeta>,
-    replacer: R,
+    replacer: Box<dyn Replacer>,
     free_list: RefCell<VecDeque<FrameID>>,
 }
 struct PoolMeta {
@@ -136,11 +112,8 @@ struct PoolMeta {
 }
 
 #[allow(dead_code)]
-impl<R> BufferPool<R>
-where
-    R: Replacer,
-{
-    fn new(max_size: usize, r: R) -> Self {
+impl BufferPool {
+    fn new(max_size: usize, r: Box<dyn Replacer>) -> Self {
         let mut frames = Vec::new();
         let mut free_list = VecDeque::new();
         for i in 0..max_size {
@@ -172,7 +145,7 @@ where
         return new_page;
     }
     fn _prepare_new_frame_meta(
-        b: &MutexGuard<BufferPool<R>>,
+        b: &MutexGuard<BufferPool>,
         locked_frame: &MutexGuard<Frame>,
         frame_id: FrameID,
         new_page_id: PageID,
@@ -211,7 +184,7 @@ where
     }
 
     fn fetch_frame<'b>(
-        b: &MutexGuard<BufferPool<R>>,
+        b: &MutexGuard<BufferPool>,
         free_frame: FrameID,
     ) -> Result<Arc<Mutex<Frame>>, StrErr> {
         let chosen_frame_p: &Arc<Mutex<Frame>>;
@@ -224,7 +197,7 @@ where
         Ok(chosen_frame)
     }
 
-    fn new_page(mu: &Mutex<BufferPool<R>>, dm: &DiskManager) -> Result<Arc<Mutex<Frame>>, StrErr> {
+    fn new_page(mu: &Mutex<BufferPool>, dm: &DiskManager) -> Result<Arc<Mutex<Frame>>, StrErr> {
         let b = mu.lock();
 
         let (free_frame, victimed) = Self::_frame_from_freelist_or_replacer(&b)?;
@@ -249,7 +222,7 @@ where
     }
 
     fn _check_page_available_in_buffer(
-        b: &MutexGuard<BufferPool<R>>,
+        b: &MutexGuard<BufferPool>,
         page_id: PageID,
     ) -> Option<FrameID> {
         let page_table = &b.page_table.borrow();
@@ -262,7 +235,7 @@ where
     }
 
     fn _check_and_get_page_available_in_buffer(
-        b: &MutexGuard<BufferPool<R>>,
+        b: &MutexGuard<BufferPool>,
         page_id: PageID,
     ) -> Result<Option<Arc<Mutex<Frame>>>, StrErr> {
         let page_table = &b.page_table.borrow();
@@ -273,7 +246,7 @@ where
                 let frame = Self::fetch_frame(&b, *frame_id)?;
                 let mut locked_frame = frame.lock();
                 locked_frame.pin();
-                b.replacer.borrow().pin(*frame_id);
+                b.replacer.pin(*frame_id);
                 drop(locked_frame);
                 return Ok(Some(frame));
             }
@@ -282,7 +255,7 @@ where
     }
 
     fn _frame_from_freelist_or_replacer(
-        b: &MutexGuard<BufferPool<R>>,
+        b: &MutexGuard<BufferPool>,
     ) -> Result<(FrameID, bool), StrErr> {
         if b.free_list.borrow().len() != 0 {
             let maybe_frame = b.free_list.borrow_mut().pop_front();
@@ -305,7 +278,7 @@ where
     }
 
     fn fetch_page(
-        mu: &Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool>,
         dm: &DiskManager,
         page_id: PageID,
     ) -> Result<Arc<Mutex<Frame>>, StrErr> {
@@ -339,7 +312,7 @@ where
         Ok(chosen_frame)
     }
 
-    fn unpin_page(mu: &Mutex<BufferPool<R>>, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
+    fn unpin_page(mu: &Mutex<BufferPool>, page_id: PageID, dirty: bool) -> Result<bool, StrErr> {
         let b = mu.lock();
         match Self::_check_page_available_in_buffer(&b, page_id) {
             Some(frame_id) => {
@@ -348,7 +321,7 @@ where
                 locked_frame.pin_count -= 1;
                 locked_frame.dirty = dirty;
                 if locked_frame.pin_count == 0 {
-                    b.replacer.borrow().unpin(frame_id);
+                    b.replacer.unpin(frame_id);
                 }
                 Ok(true)
             }
@@ -356,7 +329,7 @@ where
         }
     }
     fn unpin_frame_locked<'op>(
-        mu: &Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool>,
         page_id: PageID,
         locked: &mut MutexGuard<'op, Frame>,
         dirty: bool,
@@ -365,13 +338,13 @@ where
         locked.pin_count -= 1;
         locked.dirty = dirty;
         if locked.pin_count == 0 {
-            b.replacer.borrow().unpin(locked.id);
+            b.replacer.unpin(locked.id);
         }
         Ok(())
     }
 
     fn flush_frame_locked<'op>(
-        mu: &Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool>,
         page_id: PageID,
         locked: &mut MutexGuard<'op, Frame>,
         dm: &DiskManager,
@@ -383,14 +356,14 @@ where
     // TODO: mark this page_id inside some reuseable page allocator
     // + add deleted flag for future page fetch
     fn delete_page_locked<'op>(
-        mu: &Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool>,
         mut locked: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'op, Frame>>,
     ) -> Result<(), StrErr> {
         let b = mu.lock();
         locked.pin_count -= 1;
         locked.dirty = false;
         if locked.pin_count == 0 {
-            b.replacer.borrow().unpin(locked.id);
+            b.replacer.unpin(locked.id);
         } else {
             panic!("Some other thread is hold an arc to a deleted page, need to handle this logic here")
         }
@@ -399,7 +372,7 @@ where
     }
 
     fn unpin_flush_frame_locked<'op>(
-        mu: &Mutex<BufferPool<R>>,
+        mu: &Mutex<BufferPool>,
         page_id: PageID,
         mut locked: OwningHandle<Arc<Mutex<Frame>>, MutexGuard<'op, Frame>>,
         dm: &DiskManager,
@@ -408,18 +381,14 @@ where
         locked.pin_count -= 1;
         locked.dirty = false;
         if locked.pin_count == 0 {
-            b.replacer.borrow().unpin(locked.id);
+            b.replacer.unpin(locked.id);
         }
         drop(b);
         dm.write_from_frame_to_file(page_id, &mut locked.raw_data[..])?;
         Ok(())
     }
 
-    fn flush_page(
-        mu: &Mutex<BufferPool<R>>,
-        page_id: PageID,
-        dm: &DiskManager,
-    ) -> Result<(), StrErr> {
+    fn flush_page(mu: &Mutex<BufferPool>, page_id: PageID, dm: &DiskManager) -> Result<(), StrErr> {
         let b = mu.lock();
         match Self::_check_page_available_in_buffer(&b, page_id) {
             Some(frame_id) => {
@@ -594,7 +563,7 @@ mod tests {
         let pool_size = 10;
         let dm = DiskManager::new_from_file(tempfile().unwrap(), PAGE_SIZE as u64);
         let repl = LRURepl::new(pool_size);
-        let bpm = BufferPool::new(10, repl);
+        let bpm = BufferPool::new(10, Box::new(repl));
         let mu = Mutex::new(bpm);
 
         let mut random_bin_data: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
@@ -656,7 +625,7 @@ mod tests {
         let pool_size = 10;
         let dm = DiskManager::new_from_file(tempfile().unwrap(), PAGE_SIZE as u64);
         let repl = LRURepl::new(pool_size);
-        let bpm = BufferPool::new(10, repl);
+        let bpm = BufferPool::new(10, Box::new(repl));
         let mu = Mutex::new(bpm);
 
         let mut random_bin_data: [u8; PAGE_SIZE] = [0; PAGE_SIZE];
