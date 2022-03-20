@@ -4,21 +4,18 @@ use crate::bpm::PAGE_SIZE;
 use crate::sql;
 use crate::sql::exe::Catalog;
 use crate::sql::exe::Schema;
-use crate::sql::exe::Storage;
 use crate::sql::exe::TableMeta;
 use crate::sql::exe::Tuple;
 use crate::sql::exe::RID;
 use crate::sql::tx::Txn;
 use crate::sql::SqlResult;
-use bytemuck::try_from_bytes;
-use bytemuck::try_from_bytes_mut;
 use core::cell::RefCell;
-use core::mem::size_of;
 use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// Abandoned, use Sled for now
 pub struct Bustub {
     bpm: BufferPoolManager,
     table_ref: HashMap<String, u32>,
@@ -101,9 +98,8 @@ impl Bustub {
         for item in raw[new_json.len()..].iter_mut() {
             *item = 0;
         }
-        /* let catalog_size = try_from_bytes_mut::<usize>(raw_header).unwrap();
-         *catalog_size = new_json.len(); */
 
+        self.bpm.flush_locked(&mut locked_header)?;
         Ok(())
     }
     fn insert_tuple(&self, table: &str, tuple: Tuple, rid: RID, txn: Txn) -> SqlResult<()> {
@@ -117,23 +113,6 @@ impl Bustub {
     }
 }
 
-/* impl Storage for RefCell<Bustub> {
-    fn insert_tuple(&self, table: &str, tuple: Tuple, rid: RID, txn: Txn) -> SqlResult<()> {
-        Ok(())
-    }
-    fn mark_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()> {
-        Ok(())
-    }
-    fn apply_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()> {
-        Ok(())
-    }
-    fn get_tuple(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<Tuple> {
-        Ok(())
-    }
-    fn scan(&self, table: &str, txn: Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>> {
-        Ok(())
-    }
-} */
 impl Catalog for RefCell<Bustub> {
     fn create_table(&self, tablename: String, schema: Schema) -> SqlResult<TableMeta> {
         let mut s = self.borrow_mut();

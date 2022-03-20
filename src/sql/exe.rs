@@ -76,7 +76,19 @@ pub trait Catalog {
     fn get_table(&self, tablename: String) -> SqlResult<TableMeta>;
 }
 
-pub struct Tuple {}
+pub struct Tuple {
+    rid: RID,
+    data: Vec<u8>,
+}
+impl Tuple {
+    pub fn new(data: Vec<u8>) -> Self {
+        Tuple {
+            data,
+            rid: RID::default(),
+        }
+    }
+}
+#[derive(Default)]
 pub struct RID {
     page_id: i32,
     slot_num: u32,
