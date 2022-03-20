@@ -114,7 +114,7 @@ struct PoolMeta {
 
 #[allow(dead_code)]
 impl BufferPool {
-    fn new(max_size: usize, r: Box<dyn Replacer>) -> Self {
+    pub fn new(max_size: usize, r: Box<dyn Replacer>) -> Self {
         let mut frames = Vec::new();
         let mut free_list = VecDeque::new();
         for i in 0..max_size {
@@ -478,7 +478,7 @@ pub struct DiskManager {
 }
 #[derive(Debug)]
 pub struct StrErr {
-    root: String,
+    pub root: String,
 }
 impl StrErr {
     pub fn new(st: &str) -> Self {
