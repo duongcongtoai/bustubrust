@@ -1,8 +1,9 @@
+use super::SqlResult;
 use crate::bpm::BufferPoolManager;
 use crate::sql::tx::Txn;
+use serde_derive::{Deserialize, Serialize};
+use std::cmp::Eq;
 use std::rc::Rc;
-
-use super::SqlResult;
 
 pub struct ExecutionContext {
     storage: Rc<dyn Storage>,
@@ -23,24 +24,41 @@ impl ExecutionContext {
         self.storage.clone()
     }
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct TableMeta {
-    schema: Schema,
-    name: String,
-    oid: u32,
+    pub schema: Schema,
+    pub name: String,
+    pub oid: u32,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Schema {
-    columns: Vec<Column>,
+    pub columns: Vec<Column>,
 }
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Column {
     name: String,
     fixed_length: usize,
     variable_length: usize,
     type_id: DataType,
 }
-#[derive(Clone)]
+impl Column {
+    pub fn new(name: String, type_id: DataType) -> Self {
+        let fixed_length: usize;
+        match type_id {
+            DataType::BOOL | DataType::TINYINT => fixed_length = 1,
+            DataType::INTEGER => fixed_length = 4,
+            _ => panic!("unimplmeneted"),
+        }
+        Column {
+            name,
+            fixed_length,
+            type_id,
+            variable_length: 0,
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub enum DataType {
     INVALID,
     BOOL,

@@ -2,6 +2,8 @@ use core::fmt::Debug;
 use core::fmt::Formatter;
 use serde_derive::{Deserialize, Serialize};
 
+use crate::bpm::StrErr;
+
 use self::exe::ExecutionContext;
 
 pub mod exe;
@@ -64,6 +66,17 @@ pub enum Error {
     ReadOnly,
     Serialization,
     Value(String),
+}
+
+impl From<StrErr> for Error {
+    fn from(s: StrErr) -> Error {
+        Error::Value(s.root)
+    }
+}
+impl From<serde_json::Error> for Error {
+    fn from(s: serde_json::Error) -> Error {
+        Error::Value(s.to_string())
+    }
 }
 
 pub trait Operator {
