@@ -77,10 +77,13 @@ pub trait Catalog {
 }
 
 pub struct Tuple {
-    rid: RID,
-    data: Vec<u8>,
+    pub rid: RID,
+    pub data: Vec<u8>,
 }
 impl Tuple {
+    pub fn construct(rid: RID, data: Vec<u8>) -> Self {
+        Tuple { data, rid }
+    }
     pub fn new(data: Vec<u8>) -> Self {
         Tuple {
             data,
@@ -88,14 +91,15 @@ impl Tuple {
         }
     }
 }
-#[derive(Default)]
-pub struct RID {
+pub type RID = u64;
+// #[derive(Default)]
+/* pub struct RID {
     page_id: i32,
     slot_num: u32,
-}
+} */
 
 pub trait Storage: Catalog {
-    fn insert_tuple(&self, table: &str, tuple: Tuple, rid: RID, txn: Txn) -> SqlResult<()>;
+    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: Txn) -> SqlResult<RID>;
     fn mark_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
     fn apply_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
     fn get_tuple(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<Tuple>;
