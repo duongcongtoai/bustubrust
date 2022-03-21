@@ -68,7 +68,7 @@ impl Storage for Sled {
                 .into_iter()
                 .chain(id.iter().copied())
                 .collect::<Vec<_>>();
-            tree.insert(IVec::from(key_bytes), tuple_ref)?;
+            tree.insert(IVec::from(key_bytes), tuple_ref.data.clone())?;
             tree.flush();
             Ok(rid)
         })?;
@@ -89,13 +89,15 @@ impl Storage for Sled {
     }
     // Scan all table
     fn scan(&self, table: &str, txn: Txn) -> SqlResult<Box<(dyn Iterator<Item = Tuple>)>> {
-        let prefix = format!("data/{}", table.to_string());
+        let prefix = format!("data/{}/", table.to_string());
         let ret: Result<Vec<Tuple>, Error> = self
             .tree
             .scan_prefix(prefix.as_bytes())
             .map(move |item| {
-                let (key, value) = item.expect("scanning item");
-                let rid: RID = RID::from_be_bytes(key.as_bytes().try_into()?);
+                let (fullkey, value) = item.expect("scanning item");
+                let take_key = &fullkey[prefix.len()..];
+                let rid: RID =
+                    RID::from_be_bytes(take_key.try_into().expect("cannot convert keys to RID"));
                 return Ok(Tuple::construct(rid, value.to_vec()));
             })
             .collect();
@@ -137,6 +139,8 @@ pub mod tests {
     use crate::sql::exe::Catalog;
     use crate::sql::exe::Column;
     use crate::storage::sled::*;
+    use core::hash::Hash;
+    use std::collections::HashMap;
     use tempfile::NamedTempFile;
 
     #[test]
@@ -162,5 +166,42 @@ pub mod tests {
             .expect("getting table test_catalog");
 
         assert_eq!(ret, table_meta);
+    }
+
+    #[test]
+    fn test_sled_raw_insert() {
+        let file = NamedTempFile::new().expect("failed creating temp file");
+        let path = file.into_temp_path().to_str().unwrap().to_string();
+        let db = Sled::new(path).expect("failed creating sled");
+        let test_data: Vec<String> = ["hello1", "hello2", "hello3"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+
+        let mut inserted = HashMap::new();
+        for item in test_data {
+            let rid = db
+                .insert_tuple("hello", Tuple::new(item.as_bytes().to_vec()), Txn {})
+                .expect("inserting tuple");
+            inserted.insert(rid, item);
+        }
+
+        let all_data = db.scan("hello", Txn {}).expect("scanning table hello");
+        let scanned: HashMap<u64, String> = all_data
+            .map(|tuple| {
+                (
+                    tuple.rid,
+                    String::from_utf8(tuple.data)
+                        .expect("inserted string cannot be reconstructed somehow"),
+                )
+            })
+            .collect();
+        assert!(keys_match(&inserted, &scanned));
+    }
+    fn keys_match<T: Eq + Hash, U: PartialEq>(map1: &HashMap<T, U>, map2: &HashMap<T, U>) -> bool {
+        map1.len() == map2.len()
+            && map1
+                .keys()
+                .all(|k| map2.contains_key(k) && map1.get(k).unwrap() == map2.get(k).unwrap())
     }
 }
