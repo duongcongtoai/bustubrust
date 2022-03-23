@@ -1,18 +1,34 @@
+use self::exe::ExecutionContext;
+use crate::bpm::StrErr;
 use core::fmt::Debug;
 use core::fmt::Formatter;
 use serde_derive::{Deserialize, Serialize};
 
-use crate::bpm::StrErr;
-
-use self::exe::ExecutionContext;
-
 pub mod exe;
 mod join;
-mod scan;
+pub mod scan;
 pub mod tx;
 
 pub struct Batch {
     inner: Vec<Row>,
+}
+pub struct PartialResult {
+    done: bool,
+    inner: Batch,
+}
+impl PartialResult {
+    fn new_done() -> Self {
+        PartialResult {
+            done: true,
+            inner: Batch { inner: vec![] },
+        }
+    }
+    fn new(rows: Vec<Row>) -> Self {
+        PartialResult {
+            done: false,
+            inner: Batch { inner: rows },
+        }
+    }
 }
 impl Debug for Batch {
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), std::fmt::Error> {
@@ -41,6 +57,9 @@ impl Batch {
     pub fn data(&self) -> &Vec<Row> {
         &self.inner
     }
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
 }
 
 #[derive(Clone)]
@@ -56,6 +75,7 @@ impl Row {
     }
 }
 
+// TODO: rename into some generic type, not just about sql
 pub type SqlResult<T> = std::result::Result<T, Error>;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Error {
@@ -77,8 +97,4 @@ impl From<serde_json::Error> for Error {
     fn from(s: serde_json::Error) -> Error {
         Error::Value(s.to_string())
     }
-}
-
-pub trait Operator {
-    fn next(&mut self, e: ExecutionContext) -> SqlResult<Batch>;
 }

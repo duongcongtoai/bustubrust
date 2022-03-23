@@ -1,8 +1,11 @@
-use super::SqlResult;
+use super::{Batch, SqlResult};
 use crate::bpm::BufferPoolManager;
+use crate::sql::scan::SeqScanner;
 use crate::sql::tx::Txn;
+use crate::sql::Error;
+use crate::sql::PartialResult;
+use crate::sql::Row;
 use serde_derive::{Deserialize, Serialize};
-use std::cmp::Eq;
 use std::rc::Rc;
 
 pub struct ExecutionContext {
@@ -22,6 +25,106 @@ impl ExecutionContext {
 
     pub fn get_storage(&self) -> Rc<dyn Storage> {
         self.storage.clone()
+    }
+}
+pub trait Plan {
+    fn get_type(&self) -> PlanType;
+    fn output_schema(&self) -> Schema;
+    fn table(&self) -> String;
+    fn return_result(&self) -> bool;
+}
+pub trait Operator {
+    // fn iterate(&mut self) -> Box<dyn Iterator<Item = Batch>>;
+    fn next(&mut self) -> SqlResult<PartialResult>;
+    fn from_plan<P: Plan>(p: &P, ctx: ExecutionContext) -> Self;
+}
+pub enum PlanType {
+    SeqScan,
+    IndexScan,
+    Insert,
+    Update,
+    Delete,
+    Aggregation,
+    Limit,
+    HashJoin,
+    GraceHashJoin,
+}
+pub struct IterOp<O: Operator> {
+    inner: O,
+    err: Option<Error>,
+}
+impl<O> IterOp<O>
+where
+    O: Operator,
+{
+    // operator may fail mid way, after executing, always check error
+    pub fn error(&self) -> &Option<Error> {
+        &self.err
+    }
+}
+impl IntoIterator for Batch {
+    type Item = Row;
+    type IntoIter = std::vec::IntoIter<Row>;
+
+    fn into_iter(self) -> std::vec::IntoIter<Row> {
+        self.inner.into_iter()
+    }
+}
+
+impl<O> Iterator for IterOp<O>
+where
+    O: Operator,
+{
+    type Item = Batch;
+    fn next(&mut self) -> Option<Batch> {
+        let next_ret = self.inner.next();
+        match next_ret {
+            Ok(partial_ret) => {
+                if partial_ret.done {
+                    return None;
+                }
+                return Some(partial_ret.inner);
+            }
+            Err(some_err) => {
+                self.err = Some(some_err);
+                return None;
+            }
+        }
+    }
+}
+pub struct ResultSet {
+    rows: Vec<Row>,
+}
+pub struct Executor {}
+impl Executor {
+    // if the result set cannot be contained in memory, use some stuff like
+    // iterator or async stream
+    pub fn execute_lazy<P: Plan, O: Operator>(plan: P, ctx: ExecutionContext) {
+        todo!()
+    }
+
+    // TODO: maybe return some async iter like stream in the future
+    pub fn execute<P: Plan, O: Operator>(plan: P, ctx: ExecutionContext) -> SqlResult<ResultSet> {
+        let operator: O = Self::create_operator(&plan, ctx);
+        let iter = IterOp {
+            inner: operator,
+            err: None,
+        };
+        let ret = vec![];
+
+        // TODO: not sure if this calls next() for non_result operator
+        for item in iter.flatten() {
+            ret.push(item);
+        }
+        // error happen during iteration
+        if let Some(err) = iter.err {
+            return Err(err);
+        }
+        Ok(ResultSet { rows: ret })
+    }
+
+    pub fn create_operator<P: Plan, O: Operator>(plan: &P, ctx: ExecutionContext) -> O {
+        Operator::from_plan(plan, ctx)
     }
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
@@ -99,9 +202,9 @@ pub type RID = u64;
 } */
 
 pub trait Storage: Catalog {
-    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: Txn) -> SqlResult<RID>;
-    fn mark_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
-    fn apply_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()>;
-    fn get_tuple(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<Tuple>;
-    fn scan(&self, table: &str, txn: Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>>;
+    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: &Txn) -> SqlResult<RID>;
+    fn mark_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
+    fn apply_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
+    fn get_tuple(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<Tuple>;
+    fn scan(&self, table: &str, txn: &Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>>;
 }

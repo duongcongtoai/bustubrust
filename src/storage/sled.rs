@@ -33,13 +33,6 @@ impl Sled {
         let tree = sled::open(filename)?;
         Ok(Sled { tree })
     }
-
-    /* fn mark_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()> {
-        Ok(())
-    }
-    fn apply_delete(&self, table: &str, rid: RID, txn: Txn) -> SqlResult<()> {
-        Ok(())
-    } */
 }
 impl From<sled::transaction::TransactionError> for Error {
     fn from(e: sled::transaction::TransactionError) -> Error {
@@ -56,7 +49,7 @@ impl From<&Tuple> for IVec {
 }
 
 impl Storage for Sled {
-    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: Txn) -> SqlResult<RID> {
+    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: &Txn) -> SqlResult<RID> {
         let tuple_ref = &tuple;
         let rid = self.tree.transaction(move |tree| {
             let rid = tree.generate_id()?;
@@ -74,21 +67,39 @@ impl Storage for Sled {
         })?;
         Ok(rid as RID)
     }
-    fn mark_delete(&self, table: &str, tuple: RID, txn: Txn) -> SqlResult<()> {
+    fn mark_delete(&self, table: &str, tuple: RID, txn: &Txn) -> SqlResult<()> {
         /* self.tree.transaction(move |tree|{
             tree.remove(key)
 
         }) */
         todo!()
     }
-    fn apply_delete(&self, _: &str, _: RID, _: Txn) -> SqlResult<()> {
-        todo!()
+    fn apply_delete(&self, table: &str, rid: RID, _: &Txn) -> SqlResult<()> {
+        let prefix = format!("data/{}/", table.to_string());
+
+        let id = rid.to_be_bytes();
+        let key_bytes = prefix
+            .into_bytes()
+            .into_iter()
+            .chain(id.iter().copied())
+            .collect::<Vec<_>>();
+        self.tree.remove(key_bytes)?;
+        Ok(())
     }
-    fn get_tuple(&self, _: &str, _: RID, _: Txn) -> SqlResult<Tuple> {
-        todo!()
+    fn get_tuple(&self, table: &str, rid: RID, _: &Txn) -> SqlResult<Tuple> {
+        let prefix = format!("data/{}/", table.to_string());
+
+        let id = rid.to_be_bytes();
+        let key_bytes = prefix
+            .into_bytes()
+            .into_iter()
+            .chain(id.iter().copied())
+            .collect::<Vec<_>>();
+        let ret = self.tree.get(key_bytes)?.unwrap();
+        Ok(Tuple::construct(rid, ret.as_bytes().to_vec()))
     }
     // Scan all table
-    fn scan(&self, table: &str, txn: Txn) -> SqlResult<Box<(dyn Iterator<Item = Tuple>)>> {
+    fn scan(&self, table: &str, txn: &Txn) -> SqlResult<Box<(dyn Iterator<Item = Tuple>)>> {
         let prefix = format!("data/{}/", table.to_string());
         let ret: Result<Vec<Tuple>, Error> = self
             .tree
@@ -181,12 +192,12 @@ pub mod tests {
         let mut inserted = HashMap::new();
         for item in test_data {
             let rid = db
-                .insert_tuple("hello", Tuple::new(item.as_bytes().to_vec()), Txn {})
+                .insert_tuple("hello", Tuple::new(item.as_bytes().to_vec()), &Txn {})
                 .expect("inserting tuple");
             inserted.insert(rid, item);
         }
 
-        let all_data = db.scan("hello", Txn {}).expect("scanning table hello");
+        let all_data = db.scan("hello", &Txn {}).expect("scanning table hello");
         let scanned: HashMap<u64, String> = all_data
             .map(|tuple| {
                 (
