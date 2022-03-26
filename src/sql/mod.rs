@@ -5,6 +5,7 @@ use core::fmt::Formatter;
 use serde_derive::{Deserialize, Serialize};
 
 pub mod exe;
+pub mod insert;
 mod join;
 pub mod scan;
 pub mod tx;

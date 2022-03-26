@@ -1,20 +1,18 @@
 use crate::sql::exe::Executor;
-use crate::sql::exe::SubPlan;
-use crate::sql::join::queue::MemoryAllocator;
+use crate::sql::exe::PlanType;
 use crate::sql::Error;
 use crate::sql::ExecutionContext;
 use crate::sql::PartialResult;
 use crate::sql::SqlResult;
 use crate::sql::{exe::Operator, Batch, Row};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use twox_hash::xxh3::hash64_with_seed;
 #[allow(dead_code)]
 
 pub struct GraceHashJoinPlan {
-    left_plan: SubPlan,
-    right_plan: SubPlan,
+    left_plan: Box<PlanType>,
+    right_plan: Box<PlanType>,
 }
 
 struct HashJoiner {
