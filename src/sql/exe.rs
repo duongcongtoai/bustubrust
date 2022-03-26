@@ -1,5 +1,9 @@
+use super::util::RawInput;
 use super::{Batch, SqlResult};
 use crate::bpm::BufferPoolManager;
+use crate::sql::join::grace::GraceHashJoinPlan;
+use crate::sql::join::grace::GraceHashJoiner;
+use crate::sql::scan::SeqScanPlan;
 use crate::sql::scan::SeqScanner;
 use crate::sql::tx::Txn;
 use crate::sql::Error;
@@ -27,19 +31,22 @@ impl ExecutionContext {
         self.storage.clone()
     }
 }
-pub trait Plan {
+/* pub trait Plan {
     fn get_type(&self) -> PlanType;
     fn output_schema(&self) -> Schema;
     fn table(&self) -> String;
     fn return_result(&self) -> bool;
-}
+    fn get_left_plan<P2: Plan>(&self) -> P2;
+    fn get_right_plan<P2: Plan>(&self) -> P2;
+} */
 pub trait Operator {
     // fn iterate(&mut self) -> Box<dyn Iterator<Item = Batch>>;
     fn next(&mut self) -> SqlResult<PartialResult>;
-    fn from_plan<P: Plan>(p: &P, ctx: ExecutionContext) -> Self;
+    // fn from_plan<P: Plan>(p: &P, ctx: ExecutionContext) -> Self;
 }
 pub enum PlanType {
-    SeqScan,
+    SeqScan(SeqScanPlan),
+    RawInput(RawInput),
     IndexScan,
     Insert,
     Update,
@@ -47,16 +54,18 @@ pub enum PlanType {
     Aggregation,
     Limit,
     HashJoin,
-    GraceHashJoin,
+    GraceHashJoin(GraceHashJoinPlan),
 }
-pub struct IterOp<O: Operator> {
-    inner: O,
+pub enum SubPlan {
+    SeqScan(SeqScanPlan),
+    RawInput(RawInput),
+}
+
+pub struct IterOp {
+    inner: Box<dyn Operator>,
     err: Option<Error>,
 }
-impl<O> IterOp<O>
-where
-    O: Operator,
-{
+impl IterOp {
     // operator may fail mid way, after executing, always check error
     pub fn error(&self) -> &Option<Error> {
         &self.err
@@ -71,10 +80,7 @@ impl IntoIterator for Batch {
     }
 }
 
-impl<O> Iterator for IterOp<O>
-where
-    O: Operator,
-{
+impl Iterator for IterOp {
     type Item = Batch;
     fn next(&mut self) -> Option<Batch> {
         let next_ret = self.inner.next();
@@ -99,13 +105,13 @@ pub struct Executor {}
 impl Executor {
     // if the result set cannot be contained in memory, use some stuff like
     // iterator or async stream
-    pub fn execute_lazy<P: Plan, O: Operator>(plan: P, ctx: ExecutionContext) {
+    pub fn execute_lazy<O: Operator>(plan_type: PlanType, ctx: ExecutionContext) {
         todo!()
     }
 
     // TODO: maybe return some async iter like stream in the future
-    pub fn execute<P: Plan, O: Operator>(plan: P, ctx: ExecutionContext) -> SqlResult<ResultSet> {
-        let operator: O = Self::create_operator(&plan, ctx);
+    pub fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<ResultSet> {
+        let operator: Box<dyn Operator> = Self::create_operator(plan, ctx);
         let iter = IterOp {
             inner: operator,
             err: None,
@@ -123,8 +129,17 @@ impl Executor {
         Ok(ResultSet { rows: ret })
     }
 
-    pub fn create_operator<P: Plan, O: Operator>(plan: &P, ctx: ExecutionContext) -> O {
-        Operator::from_plan(plan, ctx)
+    pub fn create_operator(plan_type: PlanType, ctx: ExecutionContext) -> Box<dyn Operator> {
+        match plan_type {
+            PlanType::SeqScan(plan) => {
+                Box::new(SeqScanner::from_plan(plan, ctx)) as Box<dyn Operator>
+            }
+            PlanType::RawInput(raw) => Box::new(raw),
+            PlanType::GraceHashJoin(plan) => Box::new(GraceHashJoiner::from_plan(plan, ctx)),
+            _ => {
+                todo!("todo")
+            }
+        }
     }
 }
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]

@@ -1,8 +1,19 @@
-use crate::sql::{Batch, Row};
-#[allow(dead_code)]
+use crate::sql::join::queue::MemoryAllocator;
+use crate::sql::Error;
+use crate::sql::ExecutionContext;
+use crate::sql::PartialResult;
+use crate::sql::SqlResult;
+use crate::sql::{exe::Operator, Batch, Row};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
 use twox_hash::xxh3::hash64_with_seed;
+#[allow(dead_code)]
+
+pub struct GraceHashJoinPlan {
+    left_op: SubPlan,
+    right_op: SubPlan,
+}
 
 struct HashJoiner {
     outer_queue: Rc<dyn PartitionedQueue>,
@@ -39,7 +50,7 @@ impl HashJoiner {
 
 // TODO: add fallback to merge join, if partition contain duplicate joined rows count
 // that takes more than inmem partition
-struct GraceHashJoiner<F>
+pub struct GraceHashJoiner<F>
 where
     F: Fn() -> Rc<dyn PartitionedQueue>,
 {
@@ -47,6 +58,17 @@ where
     stack: Vec<PartitionLevel>,
     undone_joining_partition: Option<HashJoiner>,
     queue_allocator: F,
+}
+impl<F> Operator for GraceHashJoiner<F>
+where
+    F: Fn() -> Rc<dyn PartitionedQueue>,
+{
+    fn next(&mut self) -> Result<PartialResult, Error> {
+        match self.next_batch() {
+            Some(batch) => Ok(PartialResult::new(batch.inner)),
+            None => Ok(PartialResult::new_done()),
+        }
+    }
 }
 struct PartitionLevel {
     level: usize,
@@ -151,6 +173,24 @@ impl<F> GraceHashJoiner<F>
 where
     F: Fn() -> Rc<dyn PartitionedQueue>,
 {
+    /// A big todo here
+    pub fn from_plan(plan: GraceHashJoinPlan, f: F, ctx: ExecutionContext) -> Self {
+        let mut left = plan.left_op;
+        let mut right = plan.right_op;
+        let default_confg = Config {
+            bucket_size: 10,
+            max_size_per_partition: 10,
+            batch_size: 10,
+            left_key_offset: 4,
+            right_key_offset: 4,
+        };
+
+        let alloc = RefCell::new(MemoryAllocator::new());
+
+        let allocator = return GraceHashJoiner::new(default_confg, left, right, f)
+            .expect("failted to create grace hash joiner");
+    }
+
     fn partition_batch(b: Batch, partition_infos: &mut PartitionLevel, c: Config, is_inner: bool) {
         let mut hash_result: Vec<Vec<Row>> = Vec::new();
         for _ in 0..c.bucket_size {
@@ -263,7 +303,7 @@ where
         return st;
     }
 
-    fn next(&mut self) -> Option<Batch> {
+    fn next_batch(&mut self) -> Option<Batch> {
         if let Some(inmem_joiner) = &mut self.undone_joining_partition {
             match inmem_joiner.next() {
                 None => {
@@ -378,13 +418,14 @@ where
         }
         ret
     }
-    // we track if there exists a bucket with length > max-size per partition
-    fn new(
+
+    /// We track if there exists a bucket with length > max-size per partition
+    fn new<L: Operator, R: Operator>(
         c: Config,
-        mut left: impl Iterator<Item = Batch>,
-        mut right: impl Iterator<Item = Batch>,
+        mut left: L,
+        mut right: R,
         queue_allocator: F,
-    ) -> Self {
+    ) -> SqlResult<Self> {
         let outer_queue = queue_allocator();
         let inner_queue = queue_allocator();
         let mut joiner = GraceHashJoiner {
@@ -402,48 +443,44 @@ where
             inner_queue,
             level: 0,
         };
+        // TODO: move this to the first next() call
         'until_drain_all: loop {
-            match left.next() {
-                Some(left_batch) => {
-                    Self::partition_batch(
-                        // &outer_queue,
-                        left_batch,
-                        &mut first_level_partitions,
-                        joiner.config,
-                        false,
-                    );
-                    match right.next() {
-                        Some(right_batch) => {
-                            Self::partition_batch(
-                                // &inner_queue,
-                                right_batch,
-                                &mut first_level_partitions,
-                                joiner.config,
-                                true,
-                            );
-                        }
-                        None => {}
-                    };
+            let left_partial = left.next()?;
+            if left_partial.done {
+                let right_partial = right.next()?;
+                if right_partial.done {
+                    break 'until_drain_all;
                 }
-                None => {
-                    match right.next() {
-                        Some(right_batch) => {
-                            Self::partition_batch(
-                                // &inner_queue,
-                                right_batch,
-                                &mut first_level_partitions,
-                                joiner.config,
-                                true,
-                            );
-                        }
-                        None => break 'until_drain_all,
-                    };
-                }
-            };
+                Self::partition_batch(
+                    right_partial.inner,
+                    &mut first_level_partitions,
+                    joiner.config,
+                    true,
+                );
+                // maybe right not done yet
+                continue;
+            }
+            Self::partition_batch(
+                left_partial.inner,
+                &mut first_level_partitions,
+                joiner.config,
+                false,
+            );
+            let right_partial = right.next()?;
+            if right_partial.done {
+                // maybe left may not done yet
+                continue;
+            }
+            Self::partition_batch(
+                right_partial.inner,
+                &mut first_level_partitions,
+                joiner.config,
+                true,
+            );
         }
 
         joiner.stack.push(first_level_partitions);
-        return joiner;
+        return Ok(joiner);
     }
 
     fn hash(bytes: &[u8], bucket_size: u64, seed: u64) -> usize {
@@ -549,7 +586,7 @@ pub mod tests {
             );
             let mut ret: Vec<(i64, Vec<u8>)> = Vec::new();
             // joined result should be 1,1|1,1|1,1|1,1
-            while let Some(b) = joiner.next() {
+            while let Some(b) = joiner.next_batch() {
                 for row in b.data() {
                     let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
                     let other_data = row.inner[8..].to_vec();

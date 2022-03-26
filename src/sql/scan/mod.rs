@@ -1,11 +1,14 @@
 use crate::sql::exe::Operator;
-use crate::sql::exe::Plan;
 use crate::sql::exe::Tuple;
 use crate::sql::ExecutionContext;
 use crate::sql::PartialResult;
 use crate::sql::Row;
 use crate::sql::SqlResult;
 use itertools::Itertools;
+
+pub struct SeqScanPlan {
+    table: String,
+}
 
 // todo: batch size
 pub struct SeqScanner {
@@ -17,6 +20,17 @@ pub struct SeqScanner {
 }
 
 struct Predicate {}
+impl SeqScanner {
+    pub fn from_plan(plan: SeqScanPlan, ctx: ExecutionContext) -> Self {
+        SeqScanner {
+            predicate: Predicate {}, //todo
+            ctx,
+            init: false,
+            table: plan.table(),
+            leftover: None,
+        }
+    }
+}
 
 impl Operator for SeqScanner {
     fn next(&mut self) -> SqlResult<PartialResult> {
@@ -42,18 +56,6 @@ impl Operator for SeqScanner {
             Ok(PartialResult::new_done())
         } else {
             Ok(PartialResult::new(rows))
-        }
-    }
-    fn from_plan<P>(plan: &P, ctx: ExecutionContext) -> Self
-    where
-        P: Plan,
-    {
-        SeqScanner {
-            predicate: Predicate {}, //todo
-            ctx,
-            init: false,
-            table: plan.table(),
-            leftover: None,
         }
     }
 }

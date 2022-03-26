@@ -8,13 +8,14 @@ pub mod exe;
 mod join;
 pub mod scan;
 pub mod tx;
+pub mod util;
 
 pub struct Batch {
     inner: Vec<Row>,
 }
 pub struct PartialResult {
-    done: bool,
-    inner: Batch,
+    pub done: bool,
+    pub inner: Batch,
 }
 impl PartialResult {
     fn new_done() -> Self {

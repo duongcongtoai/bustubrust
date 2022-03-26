@@ -1,2 +1,2 @@
-mod grace;
+pub mod grace;
 mod queue;
