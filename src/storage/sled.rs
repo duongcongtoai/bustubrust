@@ -179,6 +179,8 @@ pub mod tests {
         assert_eq!(ret, table_meta);
     }
 
+    /// Insert a bunch, then seq scan and compare values
+    /// Don't care about order (using hashmap)
     #[test]
     fn test_sled_raw_insert() {
         let file = NamedTempFile::new().expect("failed creating temp file");
