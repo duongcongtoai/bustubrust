@@ -26,7 +26,7 @@ impl SeqScanner {
             predicate: Predicate {}, //todo
             ctx,
             init: false,
-            table: plan.table(),
+            table: plan.table,
             leftover: None,
         }
     }

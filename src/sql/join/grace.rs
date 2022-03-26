@@ -1,3 +1,5 @@
+use crate::sql::exe::Executor;
+use crate::sql::exe::SubPlan;
 use crate::sql::join::queue::MemoryAllocator;
 use crate::sql::Error;
 use crate::sql::ExecutionContext;
@@ -11,8 +13,8 @@ use twox_hash::xxh3::hash64_with_seed;
 #[allow(dead_code)]
 
 pub struct GraceHashJoinPlan {
-    left_op: SubPlan,
-    right_op: SubPlan,
+    left_plan: SubPlan,
+    right_plan: SubPlan,
 }
 
 struct HashJoiner {
@@ -175,8 +177,8 @@ where
 {
     /// A big todo here
     pub fn from_plan(plan: GraceHashJoinPlan, f: F, ctx: ExecutionContext) -> Self {
-        let mut left = plan.left_op;
-        let mut right = plan.right_op;
+        let left_op = Executor::create_from_subplan_operator(plan.left_plan, ctx.clone());
+        let right_op = Executor::create_from_subplan_operator(plan.right_plan, ctx.clone());
         let default_confg = Config {
             bucket_size: 10,
             max_size_per_partition: 10,
@@ -185,9 +187,7 @@ where
             right_key_offset: 4,
         };
 
-        let alloc = RefCell::new(MemoryAllocator::new());
-
-        let allocator = return GraceHashJoiner::new(default_confg, left, right, f)
+        return GraceHashJoiner::new(default_confg, left_op, right_op, f)
             .expect("failted to create grace hash joiner");
     }
 
@@ -420,10 +420,10 @@ where
     }
 
     /// We track if there exists a bucket with length > max-size per partition
-    fn new<L: Operator, R: Operator>(
+    fn new(
         c: Config,
-        mut left: L,
-        mut right: R,
+        mut left: Box<dyn Operator>,
+        mut right: Box<dyn Operator>,
         queue_allocator: F,
     ) -> SqlResult<Self> {
         let outer_queue = queue_allocator();
@@ -497,6 +497,7 @@ pub mod tests {
     use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue, Row};
     use crate::sql::join::grace::Batch;
     use crate::sql::join::queue::{Inmem, MemoryAllocator};
+    use crate::sql::util::RawInput;
     use core::cell::RefCell;
     use itertools::Itertools;
     use std::cmp::Ordering::{self, Equal};
@@ -580,10 +581,11 @@ pub mod tests {
             };
             let mut joiner = GraceHashJoiner::new(
                 config,
-                outer_batches.into_iter(),
-                inner_batches.into_iter(),
+                Box::new(RawInput::new_from_batch(outer_batches)),
+                Box::new(RawInput::new_from_batch(inner_batches)),
                 || -> Rc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
-            );
+            )
+            .expect("creating gracehashjoiner");
             let mut ret: Vec<(i64, Vec<u8>)> = Vec::new();
             // joined result should be 1,1|1,1|1,1|1,1
             while let Some(b) = joiner.next_batch() {
