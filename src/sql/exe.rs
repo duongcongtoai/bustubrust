@@ -1,7 +1,9 @@
+use super::insert::InsertPlan;
 use super::join::queue::MemoryAllocator;
 use super::util::RawInput;
 use super::{Batch, SqlResult};
 use crate::bpm::BufferPoolManager;
+use crate::sql::insert::Insert;
 use crate::sql::join::grace::GraceHashJoinPlan;
 use crate::sql::join::grace::GraceHashJoiner;
 use crate::sql::join::grace::PartitionedQueue;
@@ -19,7 +21,7 @@ use std::rc::Rc;
 pub struct ExecutionContext {
     storage: Rc<dyn Storage>,
     bpm: Rc<BufferPoolManager>,
-    txn: Txn,
+    pub txn: Txn,
     queue: Rc<RefCell<MemoryAllocator>>, // TODO: make this into a trait object
 }
 
@@ -50,19 +52,19 @@ pub trait Operator {
 pub enum PlanType {
     SeqScan(SeqScanPlan),
     RawInput(RawInput),
+    Insert(InsertPlan),
+    GraceHashJoin(GraceHashJoinPlan),
     IndexScan,
-    Insert,
     Update,
     Delete,
     Aggregation,
     Limit,
     HashJoin,
-    GraceHashJoin(GraceHashJoinPlan),
 }
-pub enum SubPlan {
+/* pub enum SubPlan {
     SeqScan(SeqScanPlan),
     RawInput(RawInput),
-}
+} */
 
 pub struct IterOp {
     inner: Box<dyn Operator>,
@@ -137,6 +139,7 @@ impl Executor {
             PlanType::SeqScan(plan) => {
                 Box::new(SeqScanner::from_plan(plan, ctx.clone())) as Box<dyn Operator>
             }
+            PlanType::Insert(plan) => Box::new(Insert::new(plan, ctx.clone())),
             PlanType::RawInput(raw) => Box::new(raw),
             PlanType::GraceHashJoin(plan) => {
                 let cloned = ctx.clone();
@@ -152,14 +155,14 @@ impl Executor {
         }
     }
     pub fn create_from_subplan_operator(
-        plan_type: SubPlan,
+        plan_type: PlanType,
         ctx: ExecutionContext,
     ) -> Box<dyn Operator> {
         match plan_type {
-            SubPlan::SeqScan(plan) => {
+            PlanType::SeqScan(plan) => {
                 Box::new(SeqScanner::from_plan(plan, ctx)) as Box<dyn Operator>
             }
-            SubPlan::RawInput(raw) => Box::new(raw),
+            PlanType::RawInput(raw) => Box::new(raw),
             _ => {
                 todo!("todo")
             }
@@ -232,6 +235,13 @@ impl Tuple {
             rid: RID::default(),
         }
     }
+    pub fn new_multi(data: Batch) -> Vec<Self> {
+        let mut ret = vec![];
+        for item in data.inner {
+            ret.push(Self::new(item.inner));
+        }
+        ret
+    }
 }
 pub type RID = u64;
 // #[derive(Default)]
@@ -241,7 +251,9 @@ pub type RID = u64;
 } */
 
 pub trait Storage: Catalog {
+    // TODO: batch insert
     fn insert_tuple(&self, table: &str, tuple: Tuple, txn: &Txn) -> SqlResult<RID>;
+    fn insert_tuples(&self, table: &str, tuple: Vec<Tuple>, txn: &Txn) -> SqlResult<RID>;
     fn mark_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
     fn apply_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
     fn get_tuple(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<Tuple>;

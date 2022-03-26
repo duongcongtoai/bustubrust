@@ -7,7 +7,6 @@ use crate::sql::exe::RID;
 use crate::sql::tx::Txn;
 use crate::sql::Error;
 use crate::sql::SqlResult;
-use bytemuck::try_from_bytes;
 use sled::Db;
 use sled::IVec;
 use std::array::TryFromSliceError;
@@ -49,6 +48,26 @@ impl From<&Tuple> for IVec {
 }
 
 impl Storage for Sled {
+    fn insert_tuples(&self, table: &str, tuples: Vec<Tuple>, txn: &Txn) -> SqlResult<RID> {
+        // let tuple_ref = &tuple;
+        let rid = self.tree.transaction(move |tree| {
+            let rid = tree.generate_id()?;
+            let id = rid.to_be_bytes();
+            let prefix = format!("data/{}/", table.to_string());
+            for item in tuples {
+                let key_bytes = prefix
+                    .into_bytes()
+                    .into_iter()
+                    .chain(id.iter().copied())
+                    .collect::<Vec<_>>();
+                tree.insert(IVec::from(key_bytes), item.data.clone())?;
+            }
+
+            tree.flush();
+            Ok(rid)
+        })?;
+        Ok(rid as RID)
+    }
     fn insert_tuple(&self, table: &str, tuple: Tuple, txn: &Txn) -> SqlResult<RID> {
         let tuple_ref = &tuple;
         let rid = self.tree.transaction(move |tree| {
