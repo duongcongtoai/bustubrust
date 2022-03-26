@@ -1,21 +1,26 @@
+use super::join::queue::MemoryAllocator;
 use super::util::RawInput;
 use super::{Batch, SqlResult};
 use crate::bpm::BufferPoolManager;
 use crate::sql::join::grace::GraceHashJoinPlan;
 use crate::sql::join::grace::GraceHashJoiner;
+use crate::sql::join::grace::PartitionedQueue;
 use crate::sql::scan::SeqScanPlan;
 use crate::sql::scan::SeqScanner;
 use crate::sql::tx::Txn;
 use crate::sql::Error;
 use crate::sql::PartialResult;
 use crate::sql::Row;
+use core::cell::RefCell;
 use serde_derive::{Deserialize, Serialize};
 use std::rc::Rc;
 
+#[derive(Clone)]
 pub struct ExecutionContext {
     storage: Rc<dyn Storage>,
     bpm: Rc<BufferPoolManager>,
     txn: Txn,
+    queue: Rc<RefCell<MemoryAllocator>>, // TODO: make this into a trait object
 }
 
 impl ExecutionContext {
@@ -30,20 +35,18 @@ impl ExecutionContext {
     pub fn get_storage(&self) -> Rc<dyn Storage> {
         self.storage.clone()
     }
+
+    // F: Fn() -> Rc<dyn PartitionedQueue>,
+
+    pub fn new_queue(&self) -> Rc<dyn PartitionedQueue> {
+        (*self.queue).borrow_mut().alloc()
+    }
 }
-/* pub trait Plan {
-    fn get_type(&self) -> PlanType;
-    fn output_schema(&self) -> Schema;
-    fn table(&self) -> String;
-    fn return_result(&self) -> bool;
-    fn get_left_plan<P2: Plan>(&self) -> P2;
-    fn get_right_plan<P2: Plan>(&self) -> P2;
-} */
+
 pub trait Operator {
-    // fn iterate(&mut self) -> Box<dyn Iterator<Item = Batch>>;
     fn next(&mut self) -> SqlResult<PartialResult>;
-    // fn from_plan<P: Plan>(p: &P, ctx: ExecutionContext) -> Self;
 }
+
 pub enum PlanType {
     SeqScan(SeqScanPlan),
     RawInput(RawInput),
@@ -65,7 +68,7 @@ pub struct IterOp {
     inner: Box<dyn Operator>,
     err: Option<Error>,
 }
-impl IterOp {
+/* impl IterOp {
     // operator may fail mid way, after executing, always check error
     pub fn error(&self) -> &Option<Error> {
         &self.err
@@ -97,7 +100,7 @@ impl Iterator for IterOp {
             }
         }
     }
-}
+} */
 pub struct ResultSet {
     rows: Vec<Row>,
 }
@@ -111,31 +114,52 @@ impl Executor {
 
     // TODO: maybe return some async iter like stream in the future
     pub fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<ResultSet> {
-        let operator: Box<dyn Operator> = Self::create_operator(plan, ctx);
-        let iter = IterOp {
-            inner: operator,
-            err: None,
-        };
-        let ret = vec![];
+        let mut operator: Box<dyn Operator> = Self::create_operator(plan, ctx);
+
+        let mut ret = vec![];
 
         // TODO: not sure if this calls next() for non_result operator
-        for item in iter.flatten() {
-            ret.push(item);
+        loop {
+            let partial_ret = operator.next()?;
+            if partial_ret.done {
+                break;
+            }
+            for item in partial_ret.inner.inner {
+                ret.push(item);
+            }
         }
-        // error happen during iteration
-        if let Some(err) = iter.err {
-            return Err(err);
-        }
+
         Ok(ResultSet { rows: ret })
     }
 
     pub fn create_operator(plan_type: PlanType, ctx: ExecutionContext) -> Box<dyn Operator> {
         match plan_type {
             PlanType::SeqScan(plan) => {
-                Box::new(SeqScanner::from_plan(plan, ctx)) as Box<dyn Operator>
+                Box::new(SeqScanner::from_plan(plan, ctx.clone())) as Box<dyn Operator>
             }
             PlanType::RawInput(raw) => Box::new(raw),
-            PlanType::GraceHashJoin(plan) => Box::new(GraceHashJoiner::from_plan(plan, ctx)),
+            PlanType::GraceHashJoin(plan) => {
+                let cloned = ctx.clone();
+                Box::new(GraceHashJoiner::from_plan(
+                    plan,
+                    move || -> Rc<dyn PartitionedQueue> { cloned.new_queue() },
+                    ctx.clone(),
+                ))
+            }
+            _ => {
+                todo!("todo")
+            }
+        }
+    }
+    pub fn create_from_subplan_operator(
+        plan_type: SubPlan,
+        ctx: ExecutionContext,
+    ) -> Box<dyn Operator> {
+        match plan_type {
+            SubPlan::SeqScan(plan) => {
+                Box::new(SeqScanner::from_plan(plan, ctx)) as Box<dyn Operator>
+            }
+            SubPlan::RawInput(raw) => Box::new(raw),
             _ => {
                 todo!("todo")
             }

@@ -1,4 +1,5 @@
 use super::exe::Operator;
+use crate::sql::Batch;
 // use crate::sql::ExecutionContext;
 use crate::sql::PartialResult;
 use crate::sql::{Error, Row};
@@ -20,6 +21,13 @@ impl Operator for RawInput {
     }
 }
 impl RawInput {
+    pub fn new_from_batch(input: Vec<Batch>) -> Self {
+        let mut inner = vec![];
+        for item in input {
+            inner.extend(item.inner);
+        }
+        RawInput { inner }
+    }
     pub fn new(inner: Vec<Row>) -> Self {
         RawInput { inner }
     }
