@@ -1,0 +1,39 @@
+{
+    "name": "test_1",
+    "size": 1000,
+    "cols": [
+        {
+            "name": "colA",
+            "type_id": "INTEGER",
+            "nullable": false,
+            "dist": "Serial",
+            "min": 0,
+            "max": 0
+        },
+        {
+            "name": "colB",
+            "type": "INTEGER",
+            "nullable": false,
+            "dist": "Uniform",
+            "min": 0,
+            "max": 9 
+        },
+        {
+            "name": "colC",
+            "type": "INTEGER",
+            "nullable": false,
+            "dist": "Uniform",
+            "min": 0,
+            "max": 9999 
+        },
+        {
+            "name": "colA",
+            "type": "Uniform",
+            "nullable": false,
+            "dist": "Serial",
+            "min": 0,
+            "max":99999 
+        }
+    ]
+
+}

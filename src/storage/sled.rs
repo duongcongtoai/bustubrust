@@ -53,8 +53,8 @@ impl Storage for Sled {
         let rid = self.tree.transaction(move |tree| {
             let rid = tree.generate_id()?;
             let id = rid.to_be_bytes();
-            let prefix = format!("data/{}/", table.to_string());
-            for item in tuples {
+            for item in &tuples {
+                let prefix = format!("data/{}/", table.to_string());
                 let key_bytes = prefix
                     .into_bytes()
                     .into_iter()
