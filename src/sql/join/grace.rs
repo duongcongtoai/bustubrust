@@ -175,8 +175,8 @@ where
 {
     /// A big todo here
     pub fn from_plan(plan: GraceHashJoinPlan, f: F, ctx: ExecutionContext) -> Self {
-        let left_op = Executor::create_from_subplan_operator(plan.left_plan, ctx.clone());
-        let right_op = Executor::create_from_subplan_operator(plan.right_plan, ctx.clone());
+        let left_op = Executor::create_from_subplan_operator(*plan.left_plan, ctx.clone());
+        let right_op = Executor::create_from_subplan_operator(*plan.right_plan, ctx.clone());
         let default_confg = Config {
             bucket_size: 10,
             max_size_per_partition: 10,

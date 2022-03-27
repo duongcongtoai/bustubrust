@@ -8,6 +8,7 @@ pub mod exe;
 pub mod insert;
 mod join;
 pub mod scan;
+pub mod table_gen;
 pub mod tx;
 pub mod util;
 

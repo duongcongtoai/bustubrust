@@ -179,12 +179,15 @@ pub struct TableMeta {
 pub struct Schema {
     pub columns: Vec<Column>,
 }
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
 pub struct Column {
-    name: String,
+    pub name: String,
+    #[serde(default)]
     fixed_length: usize,
+    #[serde(default)]
     variable_length: usize,
-    type_id: DataType,
+    pub type_id: DataType,
 }
 impl Column {
     pub fn new(name: String, type_id: DataType) -> Self {
@@ -203,7 +206,7 @@ impl Column {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
 pub enum DataType {
     INVALID,
     BOOL,
