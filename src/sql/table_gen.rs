@@ -1,21 +1,18 @@
-use super::{
-    exe::{DataType, ExecutionContext, Schema, Tuple},
-    SqlResult,
-};
-use crate::sql::exe::Column;
+use crate::sql::exe::{ExecutionContext, Tuple};
 use crate::sql::tx::Txn;
 use crate::sql::Row;
+use crate::sql::{Column, DataType, Schema, SqlResult};
 use itertools::Itertools;
 use rand::distributions::{Distribution, Uniform};
 use serde_derive::{Deserialize, Serialize};
 use std::{any::Any, cmp::min};
 
-struct GenTableUtil {
-    ctx: ExecutionContext,
+pub struct GenTableUtil {
+    pub ctx: ExecutionContext,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct TableMeta {
+pub struct TableMeta {
     name: String,
     size: usize,
     cols: Vec<ColMeta>,
@@ -65,7 +62,7 @@ impl GenTableUtil {
             }
         }
     }
-    fn gen(&self, file: String) -> SqlResult<()> {
+    pub fn gen(&self, file: String) -> SqlResult<()> {
         let store = self.ctx.get_storage();
         let json_str = std::fs::read_to_string(file).unwrap();
         let table_meta: TableMeta = serde_json::from_str(&json_str).unwrap();
@@ -77,11 +74,12 @@ impl GenTableUtil {
         let batch_size = 128;
 
         store.create_table(table_meta.name.clone(), Schema { columns: col })?;
+        println!("here");
         let mut inserted = 0;
-        while inserted < table_meta.size {
+        loop {
             // seed values for columns
             let mut values_by_column = vec![];
-            let num_val = min(batch_size, inserted);
+            let num_val = min(batch_size, table_meta.size - inserted);
             for item in &table_meta.cols {
                 values_by_column.push(Self::make_values(item, num_val));
             }
@@ -91,12 +89,15 @@ impl GenTableUtil {
                 let mut entry: Vec<u8> = vec![];
                 for single_column_rows in &values_by_column {
                     let this_column_data = &single_column_rows[row_idx].inner;
-                    entry.copy_from_slice(this_column_data);
+                    entry.extend(this_column_data);
                 }
                 batched_tuples.push(Tuple::new(entry));
             }
             store.insert_tuples(&table_meta.name, batched_tuples, &Txn {})?;
             inserted += num_val;
+            if inserted >= table_meta.size {
+                break;
+            }
         }
         Ok(())
     }
@@ -104,11 +105,10 @@ impl GenTableUtil {
 
 #[cfg(test)]
 pub mod tests {
-    use crate::sql::exe::Column;
-    use crate::sql::exe::DataType;
     use crate::sql::table_gen::ColMeta;
     use crate::sql::table_gen::Dist;
     use crate::sql::table_gen::TableMeta;
+    use crate::sql::{Column, DataType};
 
     #[test]
     fn test_json() {

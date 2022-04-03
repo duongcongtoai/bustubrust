@@ -12,7 +12,7 @@
         },
         {
             "name": "colB",
-            "type": "INTEGER",
+            "type_id": "INTEGER",
             "nullable": false,
             "dist": "Uniform",
             "min": 0,
@@ -20,7 +20,7 @@
         },
         {
             "name": "colC",
-            "type": "INTEGER",
+            "type_id": "INTEGER",
             "nullable": false,
             "dist": "Uniform",
             "min": 0,
@@ -28,7 +28,7 @@
         },
         {
             "name": "colA",
-            "type": "Uniform",
+            "type_id": "INTEGER",
             "nullable": false,
             "dist": "Serial",
             "min": 0,

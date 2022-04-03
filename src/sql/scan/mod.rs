@@ -3,11 +3,13 @@ use crate::sql::exe::Tuple;
 use crate::sql::ExecutionContext;
 use crate::sql::PartialResult;
 use crate::sql::Row;
+use crate::sql::Schema;
 use crate::sql::SqlResult;
 use itertools::Itertools;
 
 pub struct SeqScanPlan {
-    table: String,
+    pub table: String,
+    pub out_schema: Schema,
 }
 
 // todo: batch size

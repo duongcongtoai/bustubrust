@@ -1,12 +1,9 @@
 use crate::sql::exe::Catalog;
-use crate::sql::exe::Schema;
 use crate::sql::exe::Storage;
-use crate::sql::exe::TableMeta;
 use crate::sql::exe::Tuple;
 use crate::sql::exe::RID;
 use crate::sql::tx::Txn;
-use crate::sql::Error;
-use crate::sql::SqlResult;
+use crate::sql::{Error, Schema, SqlResult, TableMeta};
 use sled::Db;
 use sled::IVec;
 use std::array::TryFromSliceError;
@@ -28,7 +25,7 @@ impl From<TryFromSliceError> for Error {
 }
 
 impl Sled {
-    fn new(filename: String) -> SqlResult<Self> {
+    pub fn new(filename: String) -> SqlResult<Self> {
         let tree = sled::open(filename)?;
         Ok(Sled { tree })
     }
