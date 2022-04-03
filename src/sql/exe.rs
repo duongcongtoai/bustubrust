@@ -1,18 +1,17 @@
-use super::insert::InsertPlan;
-use super::join::queue::MemoryAllocator;
-use super::util::RawInput;
-use super::{Batch, SqlResult};
-use crate::bpm::BufferPoolManager;
-use crate::sql::insert::Insert;
-use crate::sql::join::grace::GraceHashJoinPlan;
-use crate::sql::join::grace::GraceHashJoiner;
-use crate::sql::join::grace::PartitionedQueue;
-use crate::sql::scan::SeqScanPlan;
-use crate::sql::scan::SeqScanner;
-use crate::sql::tx::Txn;
-use crate::sql::Error;
-use crate::sql::PartialResult;
-use crate::sql::Row;
+use crate::{
+    bpm::BufferPoolManager,
+    sql::{
+        insert::{Insert, InsertPlan},
+        join::{
+            grace::{GraceHashJoinPlan, GraceHashJoiner, PartitionedQueue},
+            queue::MemoryAllocator,
+        },
+        scan::{SeqScanPlan, SeqScanner},
+        tx::Txn,
+        util::RawInput,
+        Batch, Column, Error, PartialResult, Row, Schema, SqlResult, TableMeta,
+    },
+};
 use core::cell::RefCell;
 use serde_derive::{Deserialize, Serialize};
 use std::rc::Rc;
@@ -20,19 +19,27 @@ use std::rc::Rc;
 #[derive(Clone)]
 pub struct ExecutionContext {
     storage: Rc<dyn Storage>,
-    bpm: Rc<BufferPoolManager>,
+    // bpm: Rc<BufferPoolManager>,
     pub txn: Txn,
     queue: Rc<RefCell<MemoryAllocator>>, // TODO: make this into a trait object
 }
 
 impl ExecutionContext {
+    pub fn new(store: Rc<dyn Storage>) -> Self {
+        let inmem = MemoryAllocator::new();
+        ExecutionContext {
+            txn: Txn {},
+            storage: store,
+            queue: Rc::new(RefCell::new(inmem)),
+        }
+    }
     pub fn get_txn(&self) -> &Txn {
         &self.txn
     }
 
-    pub fn get_bpm(&self) -> Rc<BufferPoolManager> {
+    /* pub fn get_bpm(&self) -> Rc<BufferPoolManager> {
         self.bpm.clone()
-    }
+    } */
 
     pub fn get_storage(&self) -> Rc<dyn Storage> {
         self.storage.clone()
@@ -104,7 +111,7 @@ impl Iterator for IterOp {
     }
 } */
 pub struct ResultSet {
-    rows: Vec<Row>,
+    pub rows: Vec<Row>,
 }
 pub struct Executor {}
 impl Executor {
@@ -169,55 +176,6 @@ impl Executor {
         }
     }
 }
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct TableMeta {
-    pub schema: Schema,
-    pub name: String,
-    pub oid: u32,
-}
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct Schema {
-    pub columns: Vec<Column>,
-}
-
-#[derive(Clone, Serialize, Deserialize, PartialEq, Debug)]
-pub struct Column {
-    pub name: String,
-    #[serde(default)]
-    fixed_length: usize,
-    #[serde(default)]
-    variable_length: usize,
-    pub type_id: DataType,
-}
-impl Column {
-    pub fn new(name: String, type_id: DataType) -> Self {
-        let fixed_length: usize;
-        match type_id {
-            DataType::BOOL | DataType::TINYINT => fixed_length = 1,
-            DataType::INTEGER => fixed_length = 4,
-            _ => panic!("unimplmeneted"),
-        }
-        Column {
-            name,
-            fixed_length,
-            type_id,
-            variable_length: 0,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Debug)]
-pub enum DataType {
-    INVALID,
-    BOOL,
-    TINYINT,
-    SMALLINT,
-    INTEGER,
-    BIGINT,
-    DECIMAL,
-    VARCHAR,
-    TIMESTAMP,
-}
 pub trait Catalog {
     fn create_table(&self, tablename: String, schema: Schema) -> SqlResult<TableMeta>;
 
@@ -261,4 +219,58 @@ pub trait Storage: Catalog {
     fn apply_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
     fn get_tuple(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<Tuple>;
     fn scan(&self, table: &str, txn: &Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>>;
+}
+#[cfg(test)]
+pub mod tests {
+    use crate::{
+        sql::{
+            exe::{Executor, PlanType},
+            scan::SeqScanPlan,
+            table_gen::GenTableUtil,
+            ExecutionContext,
+        },
+        storage::sled::Sled,
+    };
+    use std::{env::current_dir, module_path, rc::Rc};
+    use tempfile::NamedTempFile;
+
+    use super::Storage;
+    #[test]
+    fn test_seq_scan() {
+        let dep = setup();
+        let mut cur_dir = current_dir().expect("failed getting current dir");
+        /* cur_dir.push("test_data");
+        cur_dir.push("test_1"); */
+        let file = format!("{}/test_data/test_1.json", cur_dir.to_str().unwrap());
+        println!("file {}", file);
+        dep.gen_table.gen(file).expect("failed generating table");
+        let executor = dep.executor;
+        let seq_scan_plan = SeqScanPlan {
+            table: "test_1".to_string(),
+        };
+        let ctx = ExecutionContext::new(dep.storage.clone());
+        let ret = Executor::execute(PlanType::SeqScan(seq_scan_plan), ctx)
+            .expect("failed executing seq scan");
+        for item in ret.rows {}
+    }
+
+    pub struct Dependencies {
+        storage: Rc<dyn Storage>,
+        executor: Executor,
+        gen_table: GenTableUtil,
+    }
+
+    pub fn setup() -> Dependencies {
+        let file = NamedTempFile::new().expect("failed creating temp file");
+        let path = file.into_temp_path().to_str().unwrap().to_string();
+        let db = Sled::new(path).expect("failed creating sled");
+        let cloned = Rc::new(db);
+        Dependencies {
+            storage: cloned.clone(),
+            executor: Executor {},
+            gen_table: GenTableUtil {
+                ctx: ExecutionContext::new(cloned),
+            },
+        }
+    }
 }

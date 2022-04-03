@@ -1,4 +1,5 @@
 use self::exe::ExecutionContext;
+pub use self::schema::{Column, DataType, Schema, TableMeta};
 use crate::bpm::StrErr;
 use core::fmt::Debug;
 use core::fmt::Formatter;
@@ -8,6 +9,7 @@ pub mod exe;
 pub mod insert;
 mod join;
 pub mod scan;
+pub mod schema;
 pub mod table_gen;
 pub mod tx;
 pub mod util;
