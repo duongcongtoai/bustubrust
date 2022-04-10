@@ -1,8 +1,8 @@
-use crate::sql::exe::{ExecutionContext, Tuple};
+use crate::sql::exe::{ExecutionContext};
 use crate::sql::tx::Txn;
-use crate::sql::Row;
-use crate::sql::{Column, DataType, Schema, SqlResult};
-use itertools::Itertools;
+use crate::sql::{ DataType, Schema, SqlResult};
+use datafusion::physical_plan::expressions::Column;
+// use itertools::Itertools;
 use rand::distributions::{Distribution, Uniform};
 use serde_derive::{Deserialize, Serialize};
 use std::{any::Any, cmp::min};
@@ -36,118 +36,118 @@ enum Dist {
 }
 
 impl GenTableUtil {
-    fn gen_integers(col: &ColMeta, count: usize) -> Vec<Row> {
-        let mut values = vec![];
-        if col.dist == Dist::Serial {
-            for i in 0..count as i32 {
-                let st = i.to_be_bytes();
-                values.push(Row::new(st.to_vec()));
-            }
-            return values;
-        }
+    // fn gen_integers(col: &ColMeta, count: usize) -> Vec<Row> {
+    //     let mut values = vec![];
+    //     if col.dist == Dist::Serial {
+    //         for i in 0..count as i32 {
+    //             let st = i.to_be_bytes();
+    //             values.push(Row::new(st.to_vec()));
+    //         }
+    //         return values;
+    //     }
 
-        let between = Uniform::from(col.min as i32..col.max as i32);
-        let mut rng = rand::thread_rng();
-        for i in 0..count as i32 {
-            let sample = between.sample(&mut rng).to_be_bytes();
-            values.push(Row::new(sample.to_vec()));
-        }
-        return values;
-    }
-    fn make_values(col: &ColMeta, count: usize) -> Vec<Row> {
-        match col.schema.type_id {
-            DataType::INTEGER => Self::gen_integers(col, count),
-            _ => {
-                todo!()
-            }
-        }
-    }
-    pub fn gen(&self, file: String) -> SqlResult<()> {
-        let store = self.ctx.get_storage();
-        let json_str = std::fs::read_to_string(file).unwrap();
-        let table_meta: TableMeta = serde_json::from_str(&json_str).unwrap();
-        let mut col = vec![];
-        for item in &table_meta.cols {
-            col.push(Column::new(item.schema.name.clone(), item.schema.type_id));
-        }
+    //     let between = Uniform::from(col.min as i32..col.max as i32);
+    //     let mut rng = rand::thread_rng();
+    //     for i in 0..count as i32 {
+    //         let sample = between.sample(&mut rng).to_be_bytes();
+    //         values.push(Row::new(sample.to_vec()));
+    //     }
+    //     return values;
+    // }
+    // fn make_values(col: &ColMeta, count: usize) -> Vec<Row> {
+    //     match col.schema.type_id {
+    //         DataType::INTEGER => Self::gen_integers(col, count),
+    //         _ => {
+    //             todo!()
+    //         }
+    //     }
+    // }
+    // pub fn gen(&self, file: String) -> SqlResult<()> {
+    //     let store = self.ctx.get_storage();
+    //     let json_str = std::fs::read_to_string(file).unwrap();
+    //     let table_meta: TableMeta = serde_json::from_str(&json_str).unwrap();
+    //     let mut col = vec![];
+    //     for item in &table_meta.cols {
+    //         col.push(Column::new(item.schema.name.clone(), item.schema.type_id));
+    //     }
 
-        let batch_size = 128;
+    //     let batch_size = 128;
 
-        store.create_table(table_meta.name.clone(), Schema { columns: col })?;
-        println!("here");
-        let mut inserted = 0;
-        loop {
-            // seed values for columns
-            let mut values_by_column = vec![];
-            let num_val = min(batch_size, table_meta.size - inserted);
-            for item in &table_meta.cols {
-                values_by_column.push(Self::make_values(item, num_val));
-            }
-            let mut batched_tuples = vec![];
+    //     store.create_table(table_meta.name.clone(), Schema { columns: col })?;
+    //     println!("here");
+    //     let mut inserted = 0;
+    //     loop {
+    //         // seed values for columns
+    //         let mut values_by_column = vec![];
+    //         let num_val = min(batch_size, table_meta.size - inserted);
+    //         for item in &table_meta.cols {
+    //             values_by_column.push(Self::make_values(item, num_val));
+    //         }
+    //         let mut batched_tuples = vec![];
 
-            for row_idx in 0..num_val {
-                let mut entry: Vec<u8> = vec![];
-                for single_column_rows in &values_by_column {
-                    let this_column_data = &single_column_rows[row_idx].inner;
-                    entry.extend(this_column_data);
-                }
-                batched_tuples.push(Tuple::new(entry));
-            }
-            store.insert_tuples(&table_meta.name, batched_tuples, &Txn {})?;
-            inserted += num_val;
-            if inserted >= table_meta.size {
-                break;
-            }
-        }
-        Ok(())
-    }
+    //         for row_idx in 0..num_val {
+    //             let mut entry: Vec<u8> = vec![];
+    //             for single_column_rows in &values_by_column {
+    //                 let this_column_data = &single_column_rows[row_idx].inner;
+    //                 entry.extend(this_column_data);
+    //             }
+    //             batched_tuples.push(Tuple::new(entry));
+    //         }
+    //         store.insert_tuples(&table_meta.name, batched_tuples, &Txn {})?;
+    //         inserted += num_val;
+    //         if inserted >= table_meta.size {
+    //             break;
+    //         }
+    //     }
+    //     Ok(())
+    // }
 }
 
-#[cfg(test)]
-pub mod tests {
-    use crate::sql::table_gen::ColMeta;
-    use crate::sql::table_gen::Dist;
-    use crate::sql::table_gen::TableMeta;
-    use crate::sql::{Column, DataType};
+// #[cfg(test)]
+// pub mod tests {
+//     use crate::sql::table_gen::ColMeta;
+//     use crate::sql::table_gen::Dist;
+//     use crate::sql::table_gen::TableMeta;
+//     use crate::sql::{Column, DataType};
 
-    #[test]
-    fn test_json() {
-        let some_json = r#"
-        {
-            "name": "test_1",
-            "size": 1000,
-            "cols": [
-                {
-                    "name": "colA",
-                    "type_id": "INTEGER",
-                    "nullable": false,
-                    "dist": "Serial",
-                    "min": 0,
-                    "max": 0
-                }
-            ]
-        }"#;
-        let got: TableMeta = serde_json::from_str(some_json).unwrap();
-        let got_col = &got.cols[0];
-        let expect = TableMeta {
-            name: "test_1".to_string(),
-            size: 1000,
-            cols: vec![ColMeta {
-                schema: Column::new("colA".to_string(), DataType::INTEGER),
-                nullable: false,
-                dist: Dist::Serial,
-                min: 0,
-                max: 0,
-            }],
-        };
-        let expect_col = &expect.cols[0];
-        assert_eq!(expect.name, got.name);
-        assert_eq!(expect.size, got.size);
-        assert_eq!(expect_col.schema.name, got_col.schema.name);
-        assert_eq!(expect_col.schema.type_id, got_col.schema.type_id);
-        assert_eq!(expect_col.nullable, got_col.nullable);
-        assert_eq!(expect_col.dist, got_col.dist);
-        assert_eq!(expect_col.min, got_col.min);
-        assert_eq!(expect_col.max, got_col.max);
-    }
-}
+//     #[test]
+//     fn test_json() {
+//         let some_json = r#"
+//         {
+//             "name": "test_1",
+//             "size": 1000,
+//             "cols": [
+//                 {
+//                     "name": "colA",
+//                     "type_id": "INTEGER",
+//                     "nullable": false,
+//                     "dist": "Serial",
+//                     "min": 0,
+//                     "max": 0
+//                 }
+//             ]
+//         }"#;
+//         let got: TableMeta = serde_json::from_str(some_json).unwrap();
+//         let got_col = &got.cols[0];
+//         let expect = TableMeta {
+//             name: "test_1".to_string(),
+//             size: 1000,
+//             cols: vec![ColMeta {
+//                 schema: Column::new("colA".to_string(), DataType::INTEGER),
+//                 nullable: false,
+//                 dist: Dist::Serial,
+//                 min: 0,
+//                 max: 0,
+//             }],
+//         };
+//         let expect_col = &expect.cols[0];
+//         assert_eq!(expect.name, got.name);
+//         assert_eq!(expect.size, got.size);
+//         assert_eq!(expect_col.schema.name, got_col.schema.name);
+//         assert_eq!(expect_col.schema.type_id, got_col.schema.type_id);
+//         assert_eq!(expect_col.nullable, got_col.nullable);
+//         assert_eq!(expect_col.dist, got_col.dist);
+//         assert_eq!(expect_col.min, got_col.min);
+//         assert_eq!(expect_col.max, got_col.max);
+//     }
+// }

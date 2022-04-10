@@ -1,11 +1,10 @@
-use crate::sql::exe::Operator;
-use crate::sql::exe::Tuple;
-use crate::sql::ExecutionContext;
-use crate::sql::PartialResult;
-use crate::sql::Row;
-use crate::sql::Schema;
-use crate::sql::SqlResult;
+use std::sync::Arc;
+
+use crate::sql::{exe::Operator, ExecutionContext, Schema, SqlResult};
+use arrow::datatypes::SchemaRef;
 use itertools::Itertools;
+
+use super::exe::SendableDataBlockStream;
 
 pub struct SeqScanPlan {
     pub table: String,
@@ -13,12 +12,14 @@ pub struct SeqScanPlan {
 }
 
 // todo: batch size
+#[derive(Debug)]
 pub struct SeqScanner {
     predicate: Predicate,
-    ctx: ExecutionContext,
+    // ctx: ExecutionContext,
     init: bool,
     table: String,
-    leftover: Option<Box<dyn Iterator<Item = Tuple>>>,
+    schema: SchemaRef,
+    // leftover: Option<Box<dyn Iterator<Item = Tuple>>>,
 }
 
 struct Predicate {}
@@ -26,38 +27,23 @@ impl SeqScanner {
     pub fn from_plan(plan: SeqScanPlan, ctx: ExecutionContext) -> Self {
         SeqScanner {
             predicate: Predicate {}, //todo
-            ctx,
+            // ctx,
             init: false,
             table: plan.table,
-            leftover: None,
+            schema: Arc::new(plan.schema),
         }
     }
 }
 
+#[async_trait::async_trait]
 impl Operator for SeqScanner {
-    fn next(&mut self) -> SqlResult<PartialResult> {
-        if !self.init {
-            self.leftover = Some(
-                self.ctx
-                    .get_storage()
-                    .scan(&self.table, self.ctx.get_txn())?,
-            );
-            self.init = true;
-        }
+    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        self.ctx
+            .get_storage()
+            .scan(&self.table, ctx.get_txn())?
+    }
 
-        let rows: Vec<Row> = vec![];
-        let st = self.leftover.as_mut().unwrap();
-
-        for chunk in &st.chunks(10) {
-            let mut rows = Vec::new();
-            for item in chunk {
-                rows.push(Row::new(item.data));
-            }
-        }
-        if rows.len() == 0 {
-            Ok(PartialResult::new_done())
-        } else {
-            Ok(PartialResult::new(rows))
-        }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 }
