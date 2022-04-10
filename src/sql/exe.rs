@@ -1,20 +1,19 @@
-use crate::{
-    bpm::BufferPoolManager,
-    sql::{
-        insert::{Insert, InsertPlan},
-        join::{
-            grace::{GraceHashJoinPlan, GraceHashJoiner, PartitionedQueue},
-            queue::MemoryAllocator,
-        },
-        scan::{SeqScanPlan, SeqScanner},
-        tx::Txn,
-        util::RawInput,
-        Batch, Column, Error, PartialResult, Row, Schema, SqlResult, TableMeta,
+use crate::sql::{
+    insert::{Insert, InsertPlan},
+    join::{
+        grace::{GraceHashJoinPlan, GraceHashJoiner, PartitionedQueue},
+        queue::MemoryAllocator,
     },
+    scan::{SeqScanPlan, SeqScanner},
+    tx::Txn,
+    util::RawInput,
+    DataBlock, Schema, SqlResult, TableMeta,
 };
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
 use core::cell::RefCell;
-use serde_derive::{Deserialize, Serialize};
-use std::rc::Rc;
+use futures::stream::Stream;
+use std::{fmt::Debug, pin::Pin, rc::Rc};
 
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -37,23 +36,50 @@ impl ExecutionContext {
         &self.txn
     }
 
-    /* pub fn get_bpm(&self) -> Rc<BufferPoolManager> {
-        self.bpm.clone()
-    } */
-
     pub fn get_storage(&self) -> Rc<dyn Storage> {
         self.storage.clone()
     }
 
-    // F: Fn() -> Rc<dyn PartitionedQueue>,
-
-    pub fn new_queue(&self) -> Rc<dyn PartitionedQueue> {
-        (*self.queue).borrow_mut().alloc()
+    pub fn new_queue(&self, schema: Schema) -> Rc<dyn PartitionedQueue> {
+        (*self.queue).borrow_mut().alloc(schema)
     }
 }
 
-pub trait Operator {
-    fn next(&mut self) -> SqlResult<PartialResult>;
+/// Trait for types that stream [arrow::record_batch::RecordBatch]
+pub trait DataBlockStream: Stream<Item = SqlResult<DataBlock>> {
+    fn schema(self) -> Schema;
+}
+pub type SendableDataBlockStream = Pin<Box<dyn DataBlockStream + Send + Sync>>;
+pub struct SchemaStream {
+    inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>>>>,
+    schema: Schema,
+}
+impl SchemaStream {
+    pub fn new(schema: Schema, inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>>>>) -> Self {
+        SchemaStream { inner, schema }
+    }
+}
+impl DataBlockStream for SchemaStream {
+    fn schema(&self) -> Schema {
+        self.schema.clone()
+    }
+}
+
+impl Stream for SchemaStream {
+    type Item = SqlResult<DataBlock>;
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        self.inner.as_mut().poll_next(cx)
+    }
+}
+
+#[async_trait]
+pub trait Operator: Debug + Send + Sync {
+    async fn execute(&mut self,ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
+
+    fn schema(&self) -> SchemaRef;
 }
 
 pub enum PlanType {
@@ -68,77 +94,25 @@ pub enum PlanType {
     Limit,
     HashJoin,
 }
-/* pub enum SubPlan {
-    SeqScan(SeqScanPlan),
-    RawInput(RawInput),
-} */
 
-pub struct IterOp {
-    inner: Box<dyn Operator>,
-    err: Option<Error>,
-}
-/* impl IterOp {
-    // operator may fail mid way, after executing, always check error
-    pub fn error(&self) -> &Option<Error> {
-        &self.err
-    }
-}
-impl IntoIterator for Batch {
-    type Item = Row;
-    type IntoIter = std::vec::IntoIter<Row>;
-
-    fn into_iter(self) -> std::vec::IntoIter<Row> {
-        self.inner.into_iter()
-    }
-}
-
-impl Iterator for IterOp {
-    type Item = Batch;
-    fn next(&mut self) -> Option<Batch> {
-        let next_ret = self.inner.next();
-        match next_ret {
-            Ok(partial_ret) => {
-                if partial_ret.done {
-                    return None;
-                }
-                return Some(partial_ret.inner);
-            }
-            Err(some_err) => {
-                self.err = Some(some_err);
-                return None;
-            }
-        }
-    }
-} */
-pub struct ResultSet {
-    pub rows: Vec<Row>,
-}
 pub struct Executor {}
 impl Executor {
-    // if the result set cannot be contained in memory, use some stuff like
-    // iterator or async stream
-    pub fn execute_lazy<O: Operator>(plan_type: PlanType, ctx: ExecutionContext) {
-        todo!()
-    }
-
     // TODO: maybe return some async iter like stream in the future
-    pub fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<ResultSet> {
+    pub async fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<DataBlock> {
         let mut operator: Box<dyn Operator> = Self::create_operator(plan, ctx);
+        let retstream: Pin<Box<dyn DataBlockStream>> = operator.execute().await?;
 
         let mut ret = vec![];
+        while let Some(value) = retstream.next().await {
+            let some_block: DataBlock = value?;
+            ret.extend(some_block.columns);
 
-        // TODO: not sure if this calls next() for non_result operator
-        loop {
-            let partial_ret = operator.next()?;
-            if partial_ret.done {
-                break;
-            }
-            for item in partial_ret.inner.inner {
-                ret.push(item);
-            }
+            println!("{}", value);
         }
 
-        Ok(ResultSet { rows: ret })
+        // TODO: not sure if this calls next() for non_result operator
+
+        Ok(DataBlock::new(retstream.schema(), ret))
     }
 
     pub fn create_operator(plan_type: PlanType, ctx: ExecutionContext) -> Box<dyn Operator> {
@@ -182,76 +156,76 @@ pub trait Catalog {
     fn get_table(&self, tablename: String) -> SqlResult<TableMeta>;
 }
 
-pub struct Tuple {
-    pub rid: RID,
-    pub data: Vec<u8>,
-}
-impl Tuple {
-    pub fn construct(rid: RID, data: Vec<u8>) -> Self {
-        Tuple { data, rid }
-    }
-    pub fn new(data: Vec<u8>) -> Self {
-        Tuple {
-            data,
-            rid: RID::default(),
-        }
-    }
-    pub fn new_multi(data: Batch) -> Vec<Self> {
-        let mut ret = vec![];
-        for item in data.inner {
-            ret.push(Self::new(item.inner));
-        }
-        ret
-    }
-}
 pub type RID = u64;
-// #[derive(Default)]
-/* pub struct RID {
-    page_id: i32,
-    slot_num: u32,
-} */
 
+#[async_trait]
 pub trait Storage: Catalog {
     // TODO: batch insert
-    fn insert_tuple(&self, table: &str, tuple: Tuple, txn: &Txn) -> SqlResult<RID>;
-    fn insert_tuples(&self, table: &str, tuple: Vec<Tuple>, txn: &Txn) -> SqlResult<RID>;
-    fn mark_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
-    fn apply_delete(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<()>;
-    fn get_tuple(&self, table: &str, rid: RID, txn: &Txn) -> SqlResult<Tuple>;
-    fn scan(&self, table: &str, txn: &Txn) -> SqlResult<Box<dyn Iterator<Item = Tuple>>>;
+    async fn insert_tuples(
+        &self,
+        table: &str,
+        data: SendableDataBlockStream,
+        txn: &Txn,
+    ) -> SqlResult<SendableDataBlockStream>;
+    async fn delete(&self, table: &str, data: SendableDataBlockStream, txn: &Txn) -> SqlResult<()>;
+    async fn get_tuples(
+        &self,
+        table: &str,
+        rids: SendableDataBlockStream,
+        txn: &Txn,
+    ) -> SqlResult<SendableDataBlockStream>;
+    async fn get_tuple(
+        &self,
+        table: &str,
+        rid: RID,
+        txn: &Txn,
+    ) -> SqlResult<SendableDataBlockStream>;
+    async fn scan(&self, table: &str, txn: &Txn) -> SqlResult<SendableDataBlockStream>;
 }
 #[cfg(test)]
 pub mod tests {
+    use super::Storage;
     use crate::{
         sql::{
             exe::{Executor, PlanType},
             scan::SeqScanPlan,
             table_gen::GenTableUtil,
-            ExecutionContext,
+            ColumnInfo, ExecutionContext, Schema,
         },
         storage::sled::Sled,
     };
-    use std::{env::current_dir, module_path, rc::Rc};
+    use std::{env::current_dir, rc::Rc};
     use tempfile::NamedTempFile;
 
-    use super::Storage;
     #[test]
     fn test_seq_scan() {
-        let dep = setup();
-        let mut cur_dir = current_dir().expect("failed getting current dir");
-        /* cur_dir.push("test_data");
-        cur_dir.push("test_1"); */
-        let file = format!("{}/test_data/test_1.json", cur_dir.to_str().unwrap());
-        println!("file {}", file);
-        dep.gen_table.gen(file).expect("failed generating table");
-        let executor = dep.executor;
-        let seq_scan_plan = SeqScanPlan {
-            table: "test_1".to_string(),
-        };
-        let ctx = ExecutionContext::new(dep.storage.clone());
-        let ret = Executor::execute(PlanType::SeqScan(seq_scan_plan), ctx)
-            .expect("failed executing seq scan");
-        for item in ret.rows {}
+        // let dep = setup();
+        // let mut cur_dir = current_dir().expect("failed getting current dir");
+        // let file = format!("{}/test_data/test_1.json", cur_dir.to_str().unwrap());
+        // println!("file {}", file);
+        // dep.gen_table.gen(file).expect("failed generating table");
+        // let executor = dep.executor;
+        // let table_meta = dep
+        //     .storage
+        //     .get_table("test_1".to_string())
+        //     .expect("failed to get catalog");
+        // let schema = table_meta.schema;
+
+        // let cols = vec![
+        //     ColumnInfo::new("colA", schema.get_type("colA")),
+        //     ColumnInfo::new("colB", schema.get_type("colB")),
+        // ];
+
+        // let out_schema = Schema { columns: cols };
+
+        // let seq_scan_plan = SeqScanPlan {
+        //     table: "test_1".to_string(),
+        //     out_schema,
+        // };
+        // let ctx = ExecutionContext::new(dep.storage.clone());
+        // let ret = Executor::execute(PlanType::SeqScan(seq_scan_plan), ctx)
+        //     .expect("failed executing seq scan");
+        // for item in ret.rows {}
     }
 
     pub struct Dependencies {

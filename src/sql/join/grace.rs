@@ -1,86 +1,123 @@
-use crate::sql::exe::Executor;
-use crate::sql::exe::PlanType;
-use crate::sql::Error;
-use crate::sql::ExecutionContext;
-use crate::sql::PartialResult;
-use crate::sql::SqlResult;
-use crate::sql::{exe::Operator, Batch, Row};
-use std::collections::HashMap;
-use std::rc::Rc;
-use twox_hash::xxh3::hash64_with_seed;
+use super::inmem::HashJoiner;
+use crate::sql::{
+    exe::{Executor, Operator, PlanType, SchemaStream, SendableDataBlockStream},
+    join::hash_util::hash_to_buckets,
+    ColumnInfo, DataBlock, ExecutionContext, Schema, SqlResult,
+};
+use ahash::RandomState;
+use arrow::{array::Array, datatypes::SchemaRef, error::Result as ArrowResult};
+use async_stream::{try_stream, AsyncStream};
+use datafusion::physical_plan::{
+    expressions::Column,
+    join_utils::{ColumnIndex, JoinSide},
+};
+use futures::{Future, FutureExt, StreamExt};
+use itertools::Itertools;
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
+
 #[allow(dead_code)]
 
 pub struct GraceHashJoinPlan {
+    on_left: Vec<Column>,
+    on_right: Vec<Column>,
     left_plan: Box<PlanType>,
     right_plan: Box<PlanType>,
 }
-
-struct HashJoiner {
-    outer_queue: Rc<dyn PartitionedQueue>,
-    inner_queue: Rc<dyn PartitionedQueue>,
-    p_index: usize,
-    batch_size: usize,
-    built: bool,
-    htable: HashMap<Vec<u8>, Vec<Row>>,
-    left_key_offset: usize,
-    right_key_offset: usize,
-    // unfinished_batch: Option<Vec<Row>>,
-}
-impl HashJoiner {
-    pub fn new(
-        outer_queue: Rc<dyn PartitionedQueue>,
-        inner_queue: Rc<dyn PartitionedQueue>,
-        p_index: usize,
-        batch_size: usize,
-        left_key_offset: usize,
-        right_key_offset: usize,
-    ) -> Self {
-        HashJoiner {
-            outer_queue,
-            inner_queue,
-            p_index,
-            batch_size,
-            left_key_offset,
-            right_key_offset,
-            built: false,
-            htable: HashMap::new(),
-        }
-    }
-}
+// type JoinedTable = RawTable<(u64, SmallVec<[u64; 1]>)>;
 
 // TODO: add fallback to merge join, if partition contain duplicate joined rows count
 // that takes more than inmem partition
-pub struct GraceHashJoiner<F>
+#[derive(Debug)]
+pub struct GraceHashJoiner<'a, F>
 where
-    F: Fn() -> Rc<dyn PartitionedQueue>,
+    F: Fn() -> Arc<dyn PartitionedQueue>,
 {
-    config: Config,
+    config: Config<'a>,
     stack: Vec<PartitionLevel>,
     undone_joining_partition: Option<HashJoiner>,
     queue_allocator: F,
+    join_column_indices: Vec<ColumnIndex>,
+    schema: SchemaRef,
 }
-impl<F> Operator for GraceHashJoiner<F>
+unsafe impl<'a, F> Send for GraceHashJoiner<'a, F> where F: Fn() -> Arc<dyn PartitionedQueue> {}
+unsafe impl<'a, F> Sync for GraceHashJoiner<'a, F> where F: Fn() -> Arc<dyn PartitionedQueue> {}
+
+#[async_trait::async_trait]
+impl<F, 'a> Operator for GraceHashJoiner<F, 'a>
 where
-    F: Fn() -> Rc<dyn PartitionedQueue>,
+    F: Fn() -> Arc<dyn PartitionedQueue> + Send + Sync + Debug,
 {
-    fn next(&mut self) -> Result<PartialResult, Error> {
-        match self.next_batch() {
-            Some(batch) => Ok(PartialResult::new(batch.inner)),
-            None => Ok(PartialResult::new_done()),
-        }
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        let stream = try_stream! {
+            'recursiveloop: while self.stack.len() > 0 {
+                while let Some((p_index, cur_level, outer_queue, inner_queue)) =
+                    self._find_next_inmem_sized_partition(self.config.max_size_per_partition)
+                {
+                    let mut inmem_joiner = self._new_hash_joiner(
+                        p_index,
+                        cur_level,
+                        self.schema.clone(),
+                        outer_queue,
+                        inner_queue,
+                    );
+                    let inmem_stream = inmem_joiner.execute(ctx).await?;
+                    while let Some(datablock) = inmem_stream.next().await {
+                        yield Ok(datablock?)
+                    }
+                }
+                while let Some((p_index, outer_queue, inner_queue)) =
+                    self._find_next_fallback_partition()
+                {
+                    // p_index is a partition that even if partition one more time, it may not fit in
+                    // memory, so we use fallback strategy like merge join instead
+                    // make this fallback operation as late as possible
+                    panic!("unimplemented")
+                }
+
+                let cur_partitions = self.stack.last_mut().unwrap();
+
+                // recursive partition
+                if cur_partitions.map.len() > 0 {
+                    // let st = cur_partitions.last_mut();
+                    if let Some(next_recursive_p) =
+                        Self::recursive_partition(&self.queue_allocator, self.config, cur_partitions)
+                            .await?
+                    {
+                        self.stack.push(next_recursive_p);
+                        continue 'recursiveloop;
+                    }
+                }
+                self.stack.pop();
+            }
+        };
+        let schema_stream = SchemaStream::new(self.schema.clone(), stream);
+        Ok(Box::pin(schema_stream))
     }
 }
+#[derive(Debug)]
 struct PartitionLevel {
     level: usize,
     map: HashMap<usize, PInfo>,
     fallback_partitions: Vec<usize>,
-    outer_queue: Rc<dyn PartitionedQueue>,
-    inner_queue: Rc<dyn PartitionedQueue>,
+    outer_queue: Arc<dyn PartitionedQueue>,
+    inner_queue: Arc<dyn PartitionedQueue>,
 }
 
-pub trait PartitionedQueue {
-    fn enqueue(&self, partition_idx: usize, data: Vec<Row>);
-    fn dequeue(&self, partition_idx: usize, size: usize) -> Option<Batch>;
+#[async_trait::async_trait]
+pub trait PartitionedQueue: Sync + Send + Debug {
+    async fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SqlResult<()>;
+
+    async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock>;
+
+    async fn dequeue(
+        &self,
+        partition_idx: usize,
+        size: usize,
+    ) -> SqlResult<SendableDataBlockStream>;
     fn id(&self) -> usize;
 }
 
@@ -89,159 +126,158 @@ struct PInfo {
     memsize: usize,
 }
 
-impl HashJoiner {
-    /* fn left_joined_key<'a>(self, r: &'a Row) -> &'a [u8] {
-        &r.inner[..self.left_key_offset]
-    } */
-    fn joined_key<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
-        &r.inner[..key_offset]
-    }
-    fn joined_data<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
-        &r.inner[key_offset..]
-    }
-
-    fn _build(&mut self) {
-        let htable = &mut self.htable;
-
-        while let Some(batch) = self.inner_queue.dequeue(self.p_index, self.batch_size) {
-            for item in batch.inner {
-                let key = Self::joined_key(self.right_key_offset, &item);
-                match htable.get_mut(key) {
-                    Some(datas) => {
-                        datas.push(item);
-                    }
-                    None => {
-                        htable.insert(key.to_vec(), vec![item]);
-                    }
-                }
-            }
-        }
-        self.built = true;
-    }
-
-    fn next(&mut self) -> Option<Batch> {
-        if !self.built {
-            self._build();
-        }
-
-        let mut ret = Vec::new();
-
-        while let Some(outer_batch) = self.outer_queue.dequeue(self.p_index, self.batch_size) {
-            for (idx, item) in outer_batch.inner.iter().enumerate() {
-                let joined_key = Self::joined_key(self.left_key_offset, &item);
-                match self
-                    .htable
-                    .get(Self::joined_key(self.left_key_offset, &item))
-                {
-                    None => {
-                        continue;
-                    }
-                    Some(inner_matches) => {
-                        for inner_match in inner_matches {
-                            let mut joined_row = item.clone();
-                            let inner_data = Self::joined_data(self.right_key_offset, &inner_match);
-                            joined_row.inner.extend(inner_data);
-                            ret.push(joined_row);
-                        }
-                        // TODO need to check batch_size
-                        // return all here for now
-                        // if ret.len() == self.batch_size {
-                        // self.unfinished_batch = Some(ret);
-                        // return Some(Batch::new(ret));
-                        // }
-                    }
-                }
-            }
-        }
-        if ret.len() > 0 {
-            return Some(Batch::new(ret));
-        }
-        return None;
-    }
-}
-
 #[derive(Copy, Clone)]
-struct Config {
+struct Config<'a> {
     bucket_size: usize,
     max_size_per_partition: usize,
     batch_size: usize,
     left_key_offset: usize,
-    right_key_offset: usize,
+    on_left: &'a [Column],
+    on_right: &'a [Column],
+}
+fn build_join_schema(left: &Schema, right: &Schema) -> (Schema, Vec<ColumnIndex>) {
+    let left_fields = left
+        .fields()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, field)| {
+            (
+                field,
+                ColumnIndex {
+                    index,
+                    side: JoinSide::Left,
+                },
+            )
+        });
+    let right_fields = right
+        .fields()
+        .iter()
+        .cloned()
+        .enumerate()
+        .map(|(index, field)| {
+            (
+                field,
+                ColumnIndex {
+                    index,
+                    side: JoinSide::Right,
+                },
+            )
+        });
+    let (combined_fields, joined_column_indices) = left_fields.chain(right_fields).unzip();
+    (Schema::new(combined_fields), joined_column_indices)
 }
 
-impl<F> GraceHashJoiner<F>
+impl<'a, F> GraceHashJoiner<'a, F>
 where
-    F: Fn() -> Rc<dyn PartitionedQueue>,
+    F: Fn() -> Arc<dyn PartitionedQueue>,
 {
     /// A big todo here
     pub fn from_plan(plan: GraceHashJoinPlan, f: F, ctx: ExecutionContext) -> Self {
         let left_op = Executor::create_from_subplan_operator(*plan.left_plan, ctx.clone());
         let right_op = Executor::create_from_subplan_operator(*plan.right_plan, ctx.clone());
-        let default_confg = Config {
+        let default_config = Config {
             bucket_size: 10,
             max_size_per_partition: 10,
             batch_size: 10,
             left_key_offset: 4,
-            right_key_offset: 4,
+            on_left: &plan.on_left,
+            on_right: &plan.on_right,
         };
+        let (left_schema, right_schema) = (left_op.schema(), right_op.schema());
 
-        return GraceHashJoiner::new(default_confg, left_op, right_op, f)
-            .expect("failted to create grace hash joiner");
+        let (schema, column_indices) = build_join_schema(&left_schema, &right_schema);
+
+        return GraceHashJoiner::new(
+            default_config,
+            left_op,
+            right_op,
+            f,
+            column_indices,
+            Arc::new(schema),
+        )
+        .expect("failted to create grace hash joiner");
     }
 
-    fn partition_batch(b: Batch, partition_infos: &mut PartitionLevel, c: Config, is_inner: bool) {
-        let mut hash_result: Vec<Vec<Row>> = Vec::new();
-        for _ in 0..c.bucket_size {
-            hash_result.push(Vec::new())
+    async fn partition_batch<'b>(
+        batch_stream: &'b mut SendableDataBlockStream,
+        partition_infos: &mut PartitionLevel,
+        c: Config<'b>,
+        is_inner: bool,
+    ) -> SqlResult<()> {
+        let mut on = c.on_left;
+        if is_inner {
+            on = c.on_right;
         }
+
         let queuer = match is_inner {
             true => &partition_infos.inner_queue,
             false => &partition_infos.outer_queue,
         };
 
-        let key_offset = match is_inner {
-            true => c.right_key_offset,
-            false => c.left_key_offset,
-        };
+        let mut reused_buffer = Vec::new();
+        while let Some(batch) = batch_stream.next().await {
+            let batch = batch?;
+            reused_buffer.clear();
+            reused_buffer.resize(batch.num_rows(), 0);
+            let batch: DataBlock = batch;
+            let col_values = on
+                .iter()
+                .map(|col_info| batch.column(col_info.index()).clone())
+                .collect::<Vec<_>>();
 
-        let this_level = partition_infos.level;
+            let indexes = hash_to_buckets(
+                &col_values,
+                &RandomState::with_seed(partition_infos.level),
+                &mut reused_buffer,
+                c.bucket_size,
+            )?;
 
-        for item in b.inner {
-            let h = Self::hash(
-                Self::get_key(key_offset, &item),
-                c.bucket_size as u64,
-                this_level as u64,
-            );
-            hash_result[h].push(item);
-        }
+            // let mut hash_result: Vec<DataBlock> =
+            //     vec![DataBlock::new_empty(batch.schema(), c.bucket_size)];
 
-        for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
-            let bucket_length = same_buckets.len();
+            let mut rename_later = vec![vec![]; c.bucket_size];
+            for (row, bucket_idx) in indexes.iter().enumerate() {
+                rename_later[*bucket_idx].push(row);
+            }
+            // Itertools::fold_ok(&mut self, start, f)
+            let maybe_hashed: ArrowResult<Vec<DataBlock>> = rename_later
+                .iter()
+                .map(|indexes| batch.project(indexes))
+                .collect();
 
-            queuer.enqueue(partition_idx, same_buckets);
+            let hash_result = maybe_hashed?;
 
-            // only care about inner input
-            if is_inner {
-                match partition_infos.map.get_mut(&partition_idx) {
-                    None => {
-                        partition_infos.map.insert(
-                            partition_idx,
-                            PInfo {
-                                memsize: bucket_length,
-                                parent_size: 0,
-                            },
-                        );
-                    }
-                    Some(info) => {
-                        info.memsize += bucket_length;
-                    }
-                };
+            for (partition_idx, same_buckets) in hash_result.into_iter().enumerate() {
+                let bucket_length = same_buckets.num_rows();
+
+                queuer.enqueue(partition_idx, same_buckets).await?;
+
+                // only care about inner input, we only need to build hashtable from inner input
+                if is_inner {
+                    match partition_infos.map.get_mut(&partition_idx) {
+                        None => {
+                            partition_infos.map.insert(
+                                partition_idx,
+                                PInfo {
+                                    memsize: bucket_length,
+                                    parent_size: 0,
+                                },
+                            );
+                        }
+                        Some(info) => {
+                            info.memsize += bucket_length;
+                        }
+                    };
+                }
             }
         }
+        Ok(())
     }
+
     fn _find_next_fallback_partition(
         &mut self,
-    ) -> Option<(usize, Rc<dyn PartitionedQueue>, Rc<dyn PartitionedQueue>)> {
+    ) -> Option<(usize, Arc<dyn PartitionedQueue>, Arc<dyn PartitionedQueue>)> {
         let partition_infos = self.stack.last_mut().unwrap();
         if partition_infos.fallback_partitions.len() == 0 {
             return None;
@@ -259,9 +295,9 @@ where
         max_size_per_partition: usize,
     ) -> Option<(
         usize,
-        PInfo,
-        Rc<dyn PartitionedQueue>,
-        Rc<dyn PartitionedQueue>,
+        usize,
+        Arc<dyn PartitionedQueue>,
+        Arc<dyn PartitionedQueue>,
     )> {
         let mut found_index = None;
         let partition_infos = self.stack.last_mut().unwrap();
@@ -275,7 +311,7 @@ where
             None => None,
             Some(index) => Some((
                 index,
-                partition_infos.map.remove(&index).unwrap(),
+                partition_infos.level,
                 partition_infos.outer_queue.clone(),
                 partition_infos.inner_queue.clone(),
             )),
@@ -285,83 +321,30 @@ where
     fn _new_hash_joiner(
         &self,
         p_index: usize,
-        outer_queue: Rc<dyn PartitionedQueue>,
-        inner_queue: Rc<dyn PartitionedQueue>,
+        cur_level: usize,
+        schema: SchemaRef,
+        outer_queue: Arc<dyn PartitionedQueue>,
+        inner_queue: Arc<dyn PartitionedQueue>,
     ) -> HashJoiner {
-        let st = HashJoiner {
-            batch_size: self.config.batch_size,
-            htable: HashMap::new(),
+        let st = HashJoiner::new(
+            self.config.on_left.to_owned(),
+            self.config.on_right.to_owned(),
             outer_queue,
             inner_queue,
-            built: false,
+            self.schema,
             p_index,
-            left_key_offset: self.config.left_key_offset,
-            right_key_offset: self.config.right_key_offset,
-        };
+            RandomState::with_seed(cur_level),
+            self.config.batch_size,
+            self.join_column_indices.clone(),
+        );
         return st;
     }
 
-    fn next_batch(&mut self) -> Option<Batch> {
-        if let Some(inmem_joiner) = &mut self.undone_joining_partition {
-            match inmem_joiner.next() {
-                None => {
-                    self.undone_joining_partition = None;
-                }
-                Some(batch_result) => {
-                    return Some(batch_result);
-                }
-            };
-        };
-
-        'recursiveloop: while self.stack.len() > 0 {
-            while let Some((p_index, _, outer_queue, inner_queue)) =
-                self._find_next_inmem_sized_partition(self.config.max_size_per_partition)
-            {
-                let mut inmem_joiner = self._new_hash_joiner(p_index, outer_queue, inner_queue);
-                match inmem_joiner.next() {
-                    None => {
-                        self.undone_joining_partition = None;
-                        continue;
-                    }
-                    Some(batch_result) => {
-                        self.undone_joining_partition = Some(inmem_joiner);
-                        return Some(batch_result);
-                    }
-                }
-            }
-            while let Some((p_index, outer_queue, inner_queue)) =
-                self._find_next_fallback_partition()
-            {
-                // p_index is a partition that even if partition one more time, it may not fit in
-                // memory, so we use fallback strategy like merge join instead
-                // make this fallback operation as late as possible
-                panic!("unimplemented")
-            }
-
-            let cur_partitions = self.stack.last_mut().unwrap();
-
-            // recursive partition
-            if cur_partitions.map.len() > 0 {
-                // let st = cur_partitions.last_mut();
-                if let Some(next_recursive_p) =
-                    Self::recursive_partition(&self.queue_allocator, self.config, cur_partitions)
-                {
-                    self.stack.push(next_recursive_p);
-                    continue 'recursiveloop;
-                }
-            }
-            self.stack.pop();
-        }
-        None
-
-        // Find next partition that we can process without having to
-        // recursively repartition.
-    }
-    fn recursive_partition(
+    async fn recursive_partition(
         queue_allocator: &F,
-        config: Config,
+        config: Config<'a>,
         current_partition: &mut PartitionLevel,
-    ) -> Option<PartitionLevel> {
+    ) -> SqlResult<Option<PartitionLevel>> {
         let mut ret = None;
         let mut item_remove = -1;
 
@@ -378,18 +361,19 @@ where
                 outer_queue: new_outer_queue,
                 level: current_partition.level + 1,
             };
-            while let Some(batch) = current_partition
+            // stream of temporary ouput we have hashed in previous steps
+            let mut outer_stream = current_partition
                 .outer_queue
                 .dequeue(*parent_p_index, config.batch_size)
-            {
-                Self::partition_batch(batch, &mut new_level, config, false);
-            }
-            while let Some(batch) = current_partition
+                .await?;
+            Self::partition_batch(&mut outer_stream, &mut new_level, config, false);
+
+            // stream of temporary ouput we have hashed in previous steps
+            let mut inner_stream = current_partition
                 .inner_queue
                 .dequeue(*parent_p_index, config.batch_size)
-            {
-                Self::partition_batch(batch, &mut new_level, config, true);
-            }
+                .await?;
+            Self::partition_batch(&mut inner_stream, &mut new_level, config, true);
             let mut fallbacks = vec![];
             new_level.map.retain(|idx, item| {
                 let before_hash = parinfo.memsize as f64;
@@ -414,7 +398,7 @@ where
         if item_remove != -1 {
             current_partition.map.remove(&(item_remove as usize));
         }
-        ret
+        Ok(ret)
     }
 
     /// We track if there exists a bucket with length > max-size per partition
@@ -423,14 +407,18 @@ where
         mut left: Box<dyn Operator>,
         mut right: Box<dyn Operator>,
         queue_allocator: F,
+        join_column_indices: Vec<ColumnIndex>,
+        schema: SchemaRef,
     ) -> SqlResult<Self> {
         let outer_queue = queue_allocator();
         let inner_queue = queue_allocator();
         let mut joiner = GraceHashJoiner {
+            schema,
             config: c,
             stack: Vec::new(),
             undone_joining_partition: None,
             queue_allocator,
+            join_column_indices,
         };
 
         let map = HashMap::new();
@@ -480,26 +468,24 @@ where
         joiner.stack.push(first_level_partitions);
         return Ok(joiner);
     }
-
-    fn hash(bytes: &[u8], bucket_size: u64, seed: u64) -> usize {
-        let ret = hash64_with_seed(bytes, seed);
-        return (ret % bucket_size) as usize;
-    }
-    fn get_key<'a>(key_offset: usize, r: &'a Row) -> &'a [u8] {
-        &r.inner[..key_offset]
-    }
 }
 
-#[cfg(test)]
-pub mod tests {
-    use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue, Row};
-    use crate::sql::join::grace::Batch;
-    use crate::sql::join::queue::{Inmem, MemoryAllocator};
-    use crate::sql::util::RawInput;
+// #[cfg(test)]
+/* pub mod tests {
+    use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue};
+    use crate::sql::{
+        join::{
+            grace::Batch,
+            queue::{Inmem, MemoryAllocator},
+        },
+        util::RawInput,
+    };
     use core::cell::RefCell;
     use itertools::Itertools;
-    use std::cmp::Ordering::{self, Equal};
-    use std::rc::Rc;
+    use std::{
+        cmp::Ordering::{self, Equal},
+        sync::Arc,
+    };
     use zerocopy::{AsBytes, FromBytes};
 
     fn make_i64s_row(item: (i64, &[u8])) -> Row {
@@ -574,14 +560,12 @@ pub mod tests {
                 bucket_size: 2,
                 max_size_per_partition: 2,
                 batch_size: 2,
-                left_key_offset,
-                right_key_offset,
             };
             let mut joiner = GraceHashJoiner::new(
                 config,
                 Box::new(RawInput::new_from_batch(outer_batches)),
                 Box::new(RawInput::new_from_batch(inner_batches)),
-                || -> Rc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
+                || -> Arc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
             )
             .expect("creating gracehashjoiner");
             let mut ret: Vec<(i64, Vec<u8>)> = Vec::new();
@@ -665,8 +649,8 @@ pub mod tests {
             in_queue.enqueue(1, inner_rows);
             out_queue.enqueue(1, outer_rows);
             let mut joiner = HashJoiner::new(
-                Rc::new(out_queue),
-                Rc::new(in_queue),
+                Arc::new(out_queue),
+                Arc::new(in_queue),
                 p_index,
                 batch_size,
                 left_key_offset,
@@ -701,4 +685,4 @@ pub mod tests {
     ) -> bool {
         left.zip(right).all(|(a, b)| a == b)
     }
-}
+} */

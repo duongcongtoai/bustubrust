@@ -27,7 +27,7 @@
             "max": 9999 
         },
         {
-            "name": "colA",
+            "name": "colD",
             "type_id": "INTEGER",
             "nullable": false,
             "dist": "Serial",

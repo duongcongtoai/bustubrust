@@ -1,20 +1,38 @@
-use std::cell::{Ref, RefCell};
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::io::copy;
-use std::sync::Mutex;
+use datafusion::prelude::*;
+use std::{
+    cell::{Ref, RefCell},
+    collections::{HashMap, VecDeque},
+    io::copy,
+    sync::Mutex,
+};
 use tinyvec::SliceVec;
 
 #[derive(Debug)]
 struct Foo;
 
 fn main() {
-    let mut st = RefCell::new(HashMap::new());
-    let mut vd = VecDeque::new();
-    vd.push_back(1);
-    st.borrow_mut().insert("a", vd);
-    let st2 = st.borrow_mut().get_mut("a").unwrap().pop_front().unwrap();
-    println!("{}", st2);
-    let st2 = st.borrow_mut().get_mut("a").unwrap().pop_front().unwrap();
-    println!("{}", st2);
+    let mut ctx = ExecutionContext::new();
+    ctx.register_csv("example", "tests/example.csv", CsvReadOptions::new())
+        .await?;
+
+    // create a plan
+    let df = ctx
+        .sql("SELECT a, MIN(b) FROM example GROUP BY a LIMIT 100")
+        .await?;
+
+    // execute the plan
+    let results: Vec<RecordBatch> = df.collect().await?;
+
+    // format the results
+    let pretty_results = arrow::util::pretty::pretty_format_batches(&results)?.to_string();
+
+    let expected = vec![
+        "+---+----------------+",
+        "| a | MIN(example.b) |",
+        "+---+----------------+",
+        "| 1 | 2              |",
+        "+---+----------------+",
+    ];
+
+    assert_eq!(pretty_results.trim().lines().collect::<Vec<_>>(), expected);
 }
