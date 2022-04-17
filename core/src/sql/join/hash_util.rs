@@ -21,16 +21,10 @@ use crate::sql::SqlResult;
 use ahash::{CallHasher, RandomState};
 use arrow::{
     array::{
-        Array, ArrayRef, BooleanArray, Date32Array, Date64Array, DecimalArray, DictionaryArray,
-        Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-        LargeStringArray, StringArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-        TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
-        UInt8Array,
+        Array, ArrayRef, BooleanArray, DecimalArray, DictionaryArray, Int16Array, Int32Array,
+        Int64Array, Int8Array, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
     },
-    datatypes::{
-        ArrowDictionaryKeyType, ArrowNativeType, DataType, Int16Type, Int32Type, Int64Type,
-        Int8Type, TimeUnit, UInt16Type, UInt32Type, UInt64Type, UInt8Type,
-    },
+    datatypes::{ArrowDictionaryKeyType, ArrowNativeType, DataType},
 };
 use std::sync::Arc;
 
@@ -199,11 +193,12 @@ fn create_hashes_dictionary<K: ArrowDictionaryKeyType>(
         for (hash, key) in hashes_buffer.iter_mut().zip(dict_array.keys().iter()) {
             if let Some(key) = key {
                 let idx = key.to_usize().ok_or_else(|| {
-                    Err(format!(
+                    format!(
                         "Can not convert key value {:?} to usize in dictionary of type {:?}",
                         key,
                         dict_array.data_type()
-                    ))
+                    )
+                    .to_string()
                 })?;
                 *hash = combine_hashes(dict_hashes[idx], *hash)
             } // no update for Null, consistent with other hashes
@@ -212,11 +207,11 @@ fn create_hashes_dictionary<K: ArrowDictionaryKeyType>(
         for (hash, key) in hashes_buffer.iter_mut().zip(dict_array.keys().iter()) {
             if let Some(key) = key {
                 let idx = key.to_usize().ok_or_else(|| {
-                    Err(format!(
+                    format!(
                         "Can not convert key value {:?} to usize in dictionary of type {:?}",
                         key,
                         dict_array.data_type()
-                    ))
+                    )
                 })?;
                 *hash = dict_hashes[idx]
             } // no update for Null, consistent with other hashes
@@ -247,7 +242,7 @@ pub fn hash_to_buckets<'a>(
     random_state: &RandomState,
     hashes_buffer: &'a mut Vec<u64>,
     buckets: usize,
-) -> SqlResult<&'a mut Vec<usize>> {
+) -> SqlResult<()> {
     // combine hashes with `combine_hashes` if we have more than 1 column
     let multi_col = arrays.len() > 1;
 
@@ -314,14 +309,18 @@ pub fn hash_to_buckets<'a>(
 
             _ => {
                 // This is internal because we should have caught this before.
-                return Err(format!(
-                    "Unsupported data type in hasher: {}",
-                    col.data_type()
-                ));
+                return Err(
+                    format!("Unsupported data type in hasher: {}", col.data_type())
+                        .to_string()
+                        .into(),
+                );
             }
         }
     }
-    Ok(hashes_buffer.into_iter().map(|h| h % buckets))
+    for item in hashes_buffer.iter_mut() {
+        *item = *item % buckets as u64;
+    }
+    Ok(())
 }
 
 /// Creates hash values for every row, based on the values in the
@@ -401,10 +400,7 @@ pub fn create_hashes<'a>(
 
             _ => {
                 // This is internal because we should have caught this before.
-                return Err(format!(
-                    "Unsupported data type in hasher: {}",
-                    col.data_type()
-                ));
+                return Err(format!("Unsupported data type in hasher: {}", col.data_type()).into());
             }
         }
     }

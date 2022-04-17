@@ -1,6 +1,4 @@
-use crate::sql::exe::{ExecutionContext};
-use crate::sql::tx::Txn;
-use crate::sql::{ DataType, Schema, SqlResult};
+use crate::sql::{exe::ExecutionContext, tx::Txn, DataType, Schema, SqlResult};
 use datafusion::physical_plan::expressions::Column;
 // use itertools::Itertools;
 use rand::distributions::{Distribution, Uniform};
@@ -18,10 +16,16 @@ pub struct TableMeta {
     cols: Vec<ColMeta>,
 }
 
+#[derive(Deserialize, Serialize, Debug)]
+pub struct AliasColumn {
+    name: String,
+    index: usize,
+}
+
 #[derive(Serialize, Deserialize, Debug)]
 struct ColMeta {
     #[serde(flatten)]
-    schema: Column,
+    schema: AliasColumn,
 
     nullable: bool,
     dist: Dist,
