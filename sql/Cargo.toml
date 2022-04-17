@@ -1,7 +1,8 @@
 [package]
-name = "core"
+name = "sql"
 version = "0.1.0"
 edition = "2021"
+
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -45,16 +46,16 @@ twox-hash = "1.6.2"
 xxhash-rust = "0.8.3"
 zerocopy = "0.6.1"
 
-[features]
-default=["testing"]
-testing=["parking_lot/deadlock_detection"]
+# [features]
+# default=["testing"]
+# testing=["parking_lot/deadlock_detection"]
 
 
 
 
 
 [lib]
-name= "core"
+name= "sql"
 path = "src/lib.rs"
 
 [profile.dev]

@@ -17,7 +17,6 @@ pub mod schema;
 pub mod table_gen;
 pub mod tx;
 pub mod util;
-// pub(crate) use self::column::hash_array_primitive;
 
 pub type DataBlock = RecordBatch;
 

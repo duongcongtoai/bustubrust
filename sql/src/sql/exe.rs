@@ -193,6 +193,7 @@ pub trait Storage: Catalog + Sync + Send {
     ) -> SqlResult<SendableDataBlockStream>;
     async fn scan(&self, table: &str, txn: &Txn) -> SqlResult<SendableDataBlockStream>;
 }
+
 #[cfg(test)]
 pub mod tests {
     use super::Storage;
