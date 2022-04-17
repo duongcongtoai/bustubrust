@@ -1,7 +1,7 @@
 use crate::sql::{
     insert::{Insert, InsertPlan},
     join::{
-        grace::{GraceHashJoinPlan, GraceHashJoiner, PartitionedQueue},
+        grace::{GraceHashJoinOp, GraceHashJoinPlan, PartitionedQueue},
         queue::MemoryAllocator,
     },
     scan::{SeqScanPlan, SeqScanner},
@@ -10,57 +10,64 @@ use crate::sql::{
     DataBlock, Schema, SqlResult, TableMeta,
 };
 use arrow::datatypes::SchemaRef;
+use async_stream::AsyncStream;
 use async_trait::async_trait;
 use core::cell::RefCell;
-use futures::stream::Stream;
-use std::{fmt::Debug, pin::Pin, rc::Rc};
+use futures::{stream::Stream, Future};
+use std::{fmt::Debug, pin::Pin, rc::Rc, sync::Arc};
 
 #[derive(Clone)]
 pub struct ExecutionContext {
-    storage: Rc<dyn Storage>,
+    storage: Arc<dyn Storage>,
     // bpm: Rc<BufferPoolManager>,
     pub txn: Txn,
-    queue: Rc<RefCell<MemoryAllocator>>, // TODO: make this into a trait object
+    queue: Arc<MemoryAllocator>, // TODO: make this into a trait object
 }
 
 impl ExecutionContext {
-    pub fn new(store: Rc<dyn Storage>) -> Self {
+    pub fn new(store: Arc<dyn Storage>) -> Self {
         let inmem = MemoryAllocator::new();
         ExecutionContext {
             txn: Txn {},
             storage: store,
-            queue: Rc::new(RefCell::new(inmem)),
+            queue: Arc::new(inmem),
         }
     }
     pub fn get_txn(&self) -> &Txn {
         &self.txn
     }
 
-    pub fn get_storage(&self) -> Rc<dyn Storage> {
+    pub fn get_storage(&self) -> Arc<dyn Storage> {
         self.storage.clone()
     }
 
-    pub fn new_queue(&self, schema: Schema) -> Rc<dyn PartitionedQueue> {
-        (*self.queue).borrow_mut().alloc(schema)
+    pub fn new_queue(&self, schema: SchemaRef) -> Arc<dyn PartitionedQueue> {
+        (*self.queue).alloc(schema)
     }
 }
 
 /// Trait for types that stream [arrow::record_batch::RecordBatch]
 pub trait DataBlockStream: Stream<Item = SqlResult<DataBlock>> {
-    fn schema(self) -> Schema;
+    fn schema(self) -> SchemaRef;
 }
 pub type SendableDataBlockStream = Pin<Box<dyn DataBlockStream + Send + Sync>>;
 pub struct SchemaStream {
-    inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>>>>,
-    schema: Schema,
+    inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>> + Send + Sync>>,
+    schema: SchemaRef,
 }
+
+unsafe impl Send for SchemaStream {}
+unsafe impl Sync for SchemaStream {}
 impl SchemaStream {
-    pub fn new(schema: Schema, inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>>>>) -> Self {
-        SchemaStream { inner, schema }
+    pub fn new(
+        schema: SchemaRef,
+        inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>> + Send + Sync>>,
+    ) -> Pin<Box<Self>> {
+        Box::pin(SchemaStream { inner, schema })
     }
 }
 impl DataBlockStream for SchemaStream {
-    fn schema(&self) -> Schema {
+    fn schema(self) -> SchemaRef {
         self.schema.clone()
     }
 }
@@ -77,7 +84,8 @@ impl Stream for SchemaStream {
 
 #[async_trait]
 pub trait Operator: Debug + Send + Sync {
-    async fn execute(&mut self,ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
+    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
 
     fn schema(&self) -> SchemaRef;
 }
@@ -98,11 +106,14 @@ pub enum PlanType {
 pub struct Executor {}
 impl Executor {
     // TODO: maybe return some async iter like stream in the future
-    pub async fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<DataBlock> {
-        let mut operator: Box<dyn Operator> = Self::create_operator(plan, ctx);
-        let retstream: Pin<Box<dyn DataBlockStream>> = operator.execute().await?;
+    pub async fn execute(
+        plan: PlanType,
+        ctx: ExecutionContext,
+    ) -> SqlResult<SendableDataBlockStream> {
+        let mut operator: Box<dyn Operator> = Self::create_operator(plan, ctx.clone());
+        operator.execute(ctx).await
 
-        let mut ret = vec![];
+        /* let mut ret = vec![];
         while let Some(value) = retstream.next().await {
             let some_block: DataBlock = value?;
             ret.extend(some_block.columns);
@@ -112,21 +123,21 @@ impl Executor {
 
         // TODO: not sure if this calls next() for non_result operator
 
-        Ok(DataBlock::new(retstream.schema(), ret))
+        Ok(DataBlock::new(retstream.schema(), ret)) */
     }
 
     pub fn create_operator(plan_type: PlanType, ctx: ExecutionContext) -> Box<dyn Operator> {
         match plan_type {
-            PlanType::SeqScan(plan) => {
+            /* PlanType::SeqScan(plan) => {
                 Box::new(SeqScanner::from_plan(plan, ctx.clone())) as Box<dyn Operator>
             }
             PlanType::Insert(plan) => Box::new(Insert::new(plan, ctx.clone())),
-            PlanType::RawInput(raw) => Box::new(raw),
+            PlanType::RawInput(raw) => Box::new(raw), */
             PlanType::GraceHashJoin(plan) => {
                 let cloned = ctx.clone();
-                Box::new(GraceHashJoiner::from_plan(
+                Box::new(GraceHashJoinOp::from_plan(
                     plan,
-                    move || -> Rc<dyn PartitionedQueue> { cloned.new_queue() },
+                    // move || -> Rc<dyn PartitionedQueue> { cloned.new_queue() },
                     ctx.clone(),
                 ))
             }
@@ -140,10 +151,10 @@ impl Executor {
         ctx: ExecutionContext,
     ) -> Box<dyn Operator> {
         match plan_type {
-            PlanType::SeqScan(plan) => {
+            /* PlanType::SeqScan(plan) => {
                 Box::new(SeqScanner::from_plan(plan, ctx)) as Box<dyn Operator>
             }
-            PlanType::RawInput(raw) => Box::new(raw),
+            PlanType::RawInput(raw) => Box::new(raw), */
             _ => {
                 todo!("todo")
             }
@@ -159,7 +170,7 @@ pub trait Catalog {
 pub type RID = u64;
 
 #[async_trait]
-pub trait Storage: Catalog {
+pub trait Storage: Catalog + Sync + Send {
     // TODO: batch insert
     async fn insert_tuples(
         &self,

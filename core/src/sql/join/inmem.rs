@@ -7,7 +7,7 @@ use crate::sql::{
         grace::PartitionedQueue,
         hash_util::{create_hashes, hash_to_buckets},
     },
-    ColumnInfo, DataBlock, DataType, Schema, SqlResult,
+    ColumnInfo, DataBlock, Error as SqlError, Schema, SqlResult,
 };
 use ahash::RandomState;
 use arrow::{
@@ -15,27 +15,32 @@ use arrow::{
         Array, ArrayData, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array,
         Int32Array, Int64Array, Int8Array, LargeStringArray, PrimitiveArray, StringArray,
         TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt16Array, UInt32Array, UInt32BufferBuilder, UInt32Builder,
-        UInt64Array, UInt64BufferBuilder, UInt64Builder, UInt8Array,
+        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt64BufferBuilder,
+        UInt8Array,
     },
     compute::take,
-    datatypes::{SchemaRef, TimeUnit, UInt32Type, UInt64Type},
+    datatypes::{DataType, SchemaRef, TimeUnit, UInt64Type},
 };
-use async_stream::{stream, try_stream};
 use datafusion::physical_plan::{
     expressions::Column,
     join_utils::{ColumnIndex, JoinSide},
 };
-use futures::{Stream, StreamExt};
+// use futures::{Stream, StreamExt};
+use futures_core::Stream;
+use futures_util::StreamExt;
 use hashbrown::raw::RawTable;
 use smallvec::{smallvec, SmallVec};
-use std::{collections::HashMap, fmt::Debug, pin::Pin, sync::Arc};
-use twox_hash::xxh3::hash64_with_seed;
+use std::{
+    fmt::Debug,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
+};
 
 type JoinedTable = RawTable<(u64, SmallVec<[u64; 1]>)>;
 
 #[derive(Debug)]
-pub struct HashJoiner {
+pub struct HashJoinOp {
     on_left: Vec<Column>,
     on_right: Vec<Column>,
     outer_queue: Arc<dyn PartitionedQueue>,
@@ -49,16 +54,126 @@ pub struct HashJoiner {
 }
 
 #[async_trait::async_trait]
-impl Operator for HashJoiner {
-    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        let (inner_record, joined_table) = self._build().await;
-        let stream =
-            self.probe_inner_with_outer_stream(inner_record, joined_table, self.random_state);
-        SchemaStream::new(self.schema.clone(), stream)
+impl Operator for HashJoinOp {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+    async fn execute(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        let (inner_data, inner_table) = self._build().await?;
+        let outer_stream: SendableDataBlockStream =
+            self.outer_queue.dequeue(self.p_index, self.batch_size)?;
+        return Ok(Box::pin(HashJoiner {
+            outer_stream,
+            on_left: self.on_left.clone(),
+            on_right: self.on_right.clone(),
+            inner_data,
+            inner_table,
+            hash_state: self.random_state.clone(),
+            join_column_indices: self.join_column_indices.clone(),
+            schema: self.schema.clone(),
+        }));
+    }
+    fn execute_sync(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        todo!()
     }
 }
 
-impl HashJoiner {
+pub struct HashJoiner {
+    outer_stream: SendableDataBlockStream,
+    on_left: Vec<Column>,
+    on_right: Vec<Column>,
+    inner_data: DataBlock,
+    inner_table: JoinedTable,
+    hash_state: RandomState,
+    join_column_indices: Vec<ColumnIndex>,
+    schema: SchemaRef,
+}
+unsafe impl Sync for HashJoiner {}
+unsafe impl Send for HashJoiner {}
+
+impl DataBlockStream for HashJoiner {
+    fn schema(self) -> SchemaRef {
+        self.schema.clone()
+    }
+}
+
+impl Stream for HashJoiner {
+    type Item = SqlResult<DataBlock>;
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::option::Option<Self::Item>> {
+        match self.outer_stream.poll_next_unpin(cx) {
+            Poll::Ready(maybe_batch) => match maybe_batch {
+                Some(batch) => {
+                    let outer_batch: DataBlock = batch?;
+                    let outer_joined_values = self
+                        .on_left
+                        .iter()
+                        .map(|c| outer_batch.column(c.index()).clone())
+                        .collect::<Vec<_>>();
+                    let inner_join_values = self
+                        .on_right
+                        .iter()
+                        .map(|c| self.inner_data.column(c.index()).clone())
+                        .collect::<Vec<_>>();
+                    let mut hash_buffer = vec![0; outer_joined_values[0].len()];
+                    let outer_hash_values =
+                        create_hashes(&outer_joined_values, &self.hash_state, &mut hash_buffer)?;
+                    let mut outer_indices = UInt64BufferBuilder::new(0);
+                    let mut inner_indices = UInt64BufferBuilder::new(0);
+
+                    for (outer_row, hash_value) in outer_hash_values.iter().enumerate() {
+                        if let Some((_, indices)) = self
+                            .inner_table
+                            .get(*hash_value, |(hash, _)| *hash_value == *hash)
+                        {
+                            // equal hash, need to check real value
+                            for inner_row in indices {
+                                if equal_rows(
+                                    *inner_row as usize,
+                                    outer_row,
+                                    &inner_join_values,
+                                    &outer_joined_values,
+                                    false,
+                                )? {
+                                    outer_indices.append(outer_row as u64);
+                                    inner_indices.append(*inner_row as u64);
+                                }
+                            }
+                        }
+                    }
+                    let inner = ArrayData::builder(arrow::datatypes::DataType::UInt64)
+                        .len(inner_indices.len())
+                        .add_buffer(inner_indices.finish())
+                        .build()
+                        .unwrap();
+                    let inner_indices = PrimitiveArray::<UInt64Type>::from(inner);
+
+                    let outer = ArrayData::builder(arrow::datatypes::DataType::UInt64)
+                        .len(outer_indices.len())
+                        .add_buffer(outer_indices.finish())
+                        .build()
+                        .unwrap();
+                    let outer_indices = PrimitiveArray::<UInt64Type>::from(outer);
+                    let next_batch = build_batch_from_indices(
+                        &self.schema,
+                        &outer_batch,
+                        &self.inner_data,
+                        outer_indices,
+                        inner_indices,
+                        &self.join_column_indices,
+                    )?;
+                    Poll::Ready(Some(Ok(next_batch)))
+                }
+                None => Poll::Ready(None),
+            },
+            pending => pending,
+        }
+    }
+}
+
+impl HashJoinOp {
     pub fn new(
         on_left: Vec<Column>,
         on_right: Vec<Column>,
@@ -70,7 +185,7 @@ impl HashJoiner {
         batch_size: usize,
         join_column_indices: Vec<ColumnIndex>,
     ) -> Self {
-        HashJoiner {
+        HashJoinOp {
             on_left,
             on_right,
             outer_queue,
@@ -84,15 +199,15 @@ impl HashJoiner {
         }
     }
 
-    fn make_joined_columes(joined_on: &[ColumnInfo], data: &DataBlock) -> Vec<ArrayRef> {
+    fn make_joined_columes(joined_on: &[Column], data: &DataBlock) -> Vec<ArrayRef> {
         joined_on
             .iter()
-            .map(|col_info| data.column(col_info.index).clone())
+            .map(|col_info| data.column(col_info.index()).clone())
             .collect::<Vec<_>>()
     }
 
     fn hash_batch_and_store(
-        joined_on: &[ColumnInfo],
+        joined_on: &[Column],
         htable: &mut JoinedTable,
         batch: &DataBlock,
         offset: usize,
@@ -120,95 +235,32 @@ impl HashJoiner {
         Ok(())
     }
 
-    async fn _build(&mut self) -> (DataBlock, JoinedTable) {
+    async fn _build(&mut self) -> SqlResult<(DataBlock, JoinedTable)> {
         let mut join_table = JoinedTable::new();
         let inner_batch = self.inner_queue.dequeue_all(self.p_index).await?;
 
         let mut hash_buffer = Vec::new();
-        let mut offset = 0;
+        let offset = 0;
         hash_buffer.clear();
         hash_buffer.resize(inner_batch.num_rows(), 0);
-        Self::hash_batch_and_store(&self.on_right, &mut join_table, &mut hash_buffer);
+        Self::hash_batch_and_store(
+            &self.on_right,
+            &mut join_table,
+            &inner_batch,
+            offset,
+            &mut hash_buffer,
+        );
         self.built = true;
-        (inner_batch, join_table)
-    }
-    async fn probe_inner_with_outer_stream(
-        &mut self,
-        inner_data: DataBlock,
-        inner_table: JoinedTable,
-        hash_state: RandomState,
-    ) -> Pin<Box<impl Stream<Item = SqlResult<DataBlock>>>> {
-        let stream = try_stream! {
-            // let mut ret = Vec::new();
-            let outer_stream: SendableDataBlockStream = self
-                .outer_queue
-                .dequeue(self.p_index, self.batch_size)
-                .await?;
-            while let batch = outer_stream.next().await? {
-                let outer_batch: DataBlock = batch;
-                let outer_joined_values = self
-                    .on_left
-                    .iter()
-                    .map(|c| outer_batch.column(c.index()))
-                    .collect::<Vec<_>>();
-                let inner_join_values = self
-                    .on_right
-                    .iter()
-                    .map(|c| inner_data.column(c.index()))
-                    .collect::<Vec<_>>();
-                let hash_buffer = vec![0; outer_joined_values[0].len()];
-                let outer_hash_values =
-                    create_hashes(&outer_joined_values, &hash_state, &mut hash_buffer)?;
-                let outer_indices = UInt64BufferBuilder::new(0);
-                let inner_indices = UInt32BufferBuilder::new(0);
-
-                for (outer_row, hash_value) in outer_hash_values.iter().enumerate() {
-                    if let Some((_, indices)) =
-                        inner_table.get(*hash_value, |(hash, _)| *hash_value == *hash)
-                    {
-                        // equal hash, need to check real value
-                        for inner_row in indices {
-                            if equal_rows(
-                                inner_row as usize,
-                                outer_row,
-                                &inner_join_values,
-                                &outer_batch,
-                                false,
-                            ) {
-                                outer_indices.append(outer_row);
-                                inner_indices.append(inner_row as u32);
-                            }
-                        }
-                    }
-                }
-                let inner = ArrayData::builder(arrow::datatypes::DataType::UInt64)
-                    .len(inner_indices.len())
-                    .add_buffer(inner_indices.finish())
-                    .build()
-                    .unwrap();
-                let inner_indices = PrimitiveArray::<UInt64Type>::from(inner);
-
-                let outer = ArrayData::builder(arrow::datatypes::DataType::UInt64)
-                    .len(outer_indices.len())
-                    .add_buffer(outer_indices.finish())
-                    .build()
-                    .unwrap();
-                let outer_indices = PrimitiveArray::<UInt64Type>::from(outer);
-                let next_batch = build_batch_from_indices(self.schema,&outer_batch,&inner_data,outer_indices,inner_indices)?;
-                yield(next_batch)
-            }
-            return;
-        };
-        return Pin::new(Box::new(stream));
+        Ok((inner_batch, join_table))
     }
 }
 
 fn build_batch_from_indices(
-    schema: Schema,
+    schema: &SchemaRef,
     outer: &DataBlock,
     inner: &DataBlock,
     outer_indices: UInt64Array,
-    inner_indices: UInt32Array,
+    inner_indices: UInt64Array,
     column_indices: &[ColumnIndex],
 ) -> SqlResult<DataBlock> {
     let mut columns: Vec<Arc<dyn Array>> = Vec::with_capacity(schema.fields().len());
@@ -225,7 +277,7 @@ fn build_batch_from_indices(
         };
         columns.push(col_values);
     }
-    DataBlock::try_new(Arc::new(schema.clone()), columns)
+    Ok(DataBlock::try_new(schema.clone(), columns)?)
 }
 
 macro_rules! equal_rows_elem {
@@ -330,7 +382,7 @@ fn equal_rows(
             }
             _ => {
                 // This is internal because we should have caught this before.
-                err = Some("Unsupported data type in hasher".to_string());
+                err = Some(Err(SqlError::Value("something wrong".to_string())));
                 false
             }
         });

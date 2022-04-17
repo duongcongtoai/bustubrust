@@ -1,8 +1,6 @@
-use std::sync::Arc;
-
 use crate::sql::{exe::Operator, ExecutionContext, Schema, SqlResult};
 use arrow::datatypes::SchemaRef;
-use itertools::Itertools;
+use std::sync::Arc;
 
 use super::exe::SendableDataBlockStream;
 
@@ -22,7 +20,9 @@ pub struct SeqScanner {
     // leftover: Option<Box<dyn Iterator<Item = Tuple>>>,
 }
 
+#[derive(Debug)]
 struct Predicate {}
+
 impl SeqScanner {
     pub fn from_plan(plan: SeqScanPlan, ctx: ExecutionContext) -> Self {
         SeqScanner {
@@ -30,17 +30,18 @@ impl SeqScanner {
             // ctx,
             init: false,
             table: plan.table,
-            schema: Arc::new(plan.schema),
+            schema: Arc::new(plan.out_schema),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl Operator for SeqScanner {
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        todo!()
+    }
     async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        self.ctx
-            .get_storage()
-            .scan(&self.table, ctx.get_txn())?
+        ctx.get_storage().scan(&self.table, ctx.get_txn()).await
     }
 
     fn schema(&self) -> SchemaRef {
