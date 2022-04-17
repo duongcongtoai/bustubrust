@@ -458,7 +458,7 @@ impl GraceHashJoinOp {
         join_column_indices: Vec<ColumnIndex>,
         schema: SchemaRef,
     ) -> SqlResult<Self> {
-        let mut joiner = GraceHashJoinOp {
+        let joiner = GraceHashJoinOp {
             schema,
             config: c,
             stack: Vec::new(),
@@ -472,14 +472,11 @@ impl GraceHashJoinOp {
     }
 }
 
-// #[cfg(test)]
-/* pub mod tests {
+#[cfg(test)]
+pub mod tests {
     use super::{Config, GraceHashJoiner, HashJoiner, PartitionedQueue};
     use crate::sql::{
-        join::{
-            grace::Batch,
-            queue::{Inmem, MemoryAllocator},
-        },
+        join::queue::{Inmem, MemoryAllocator},
         util::RawInput,
     };
     use core::cell::RefCell;
@@ -687,4 +684,4 @@ impl GraceHashJoinOp {
     ) -> bool {
         left.zip(right).all(|(a, b)| a == b)
     }
-} */
+}
