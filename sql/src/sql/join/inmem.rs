@@ -109,6 +109,8 @@ impl Stream for HashJoiner {
             Poll::Ready(maybe_batch) => match maybe_batch {
                 Some(batch) => {
                     let outer_batch: DataBlock = batch?;
+
+                    println!("batch : {:?}", outer_batch);
                     let outer_joined_values = self
                         .on_left
                         .iter()
@@ -214,13 +216,10 @@ impl HashJoinOp {
         batch: &DataBlock,
         offset: usize,
         reused_hash_buffer: &mut Vec<u64>,
+        hash_state: &RandomState,
     ) -> SqlResult<()> {
         let joined_columnar = Self::make_joined_columes(joined_on, batch);
-        let hash_values = create_hashes(
-            &joined_columnar,
-            &RandomState::with_seeds(0, 0, 0, 0),
-            reused_hash_buffer,
-        )?;
+        let hash_values = create_hashes(&joined_columnar, hash_state, reused_hash_buffer)?;
         for (row, hash_value) in hash_values.iter().enumerate() {
             let item = htable.get_mut(*hash_value, |(hash, _)| *hash_value == *hash);
             if let Some((_, indices)) = item {
@@ -250,6 +249,7 @@ impl HashJoinOp {
             &inner_batch,
             offset,
             &mut hash_buffer,
+            &self.random_state,
         )?;
         self.built = true;
         Ok((inner_batch, join_table))
