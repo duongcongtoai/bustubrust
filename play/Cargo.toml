@@ -1,0 +1,18 @@
+[package]
+name = "play"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-stream = "0.3.3"
+async-trait = "0.1.53"
+futures = "0.3.21"
+futures-core = "0.3.21"
+pin-project = "1.0.10"
+tokio = {version="1.17.0",features=["full"]}
+
+[[bin]]
+name = "play"
+path = "src/main.rs"
