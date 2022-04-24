@@ -1,9 +1,10 @@
 use crate::sql::{
-    exe::{SchemaStream, SendableDataBlockStream},
+    exe::{SchemaStream, SendableDataBlockStream, SendableResult},
     join::grace::PartitionedQueue,
     DataBlock, SqlResult,
 };
-use arrow::datatypes::SchemaRef;
+use async_stream::stream;
+use datafusion::arrow::datatypes::SchemaRef;
 use futures::Stream;
 use parking_lot::Mutex;
 use std::{
@@ -94,7 +95,7 @@ impl PartitionedQueue for Inmem {
     fn id(&self) -> usize {
         self.id
     }
-    async fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SqlResult<()> {
+    fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SendableResult {
         let mut inner = self.inner.borrow_mut();
         match inner.get_mut(&partition_idx) {
             None => {
@@ -106,14 +107,17 @@ impl PartitionedQueue for Inmem {
                 exist.push_back(data);
             }
         }
-        Ok(())
+        Box::pin(async { Ok(()) })
     }
 
     async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock> {
         let mut inner = self.inner.borrow_mut();
         let ret = DataBlock::new_empty(self.schema.clone());
         match inner.get_mut(&partition_idx) {
-            None => Err("not found".to_string())?,
+            None => Err(format!(
+                "not found data for partition idx {}",
+                partition_idx
+            ))?,
             Some(exist) => {
                 let mut st = vec![];
                 while let Some(batch) = exist.pop_front() {

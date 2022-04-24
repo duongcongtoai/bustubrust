@@ -19,7 +19,7 @@
 
 use crate::sql::SqlResult;
 use ahash::{CallHasher, RandomState};
-use arrow::{
+use datafusion::arrow::{
     array::{
         Array, ArrayRef, BooleanArray, DecimalArray, DictionaryArray, Int16Array, Int32Array,
         Int64Array, Int8Array, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
