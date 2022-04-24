@@ -171,6 +171,7 @@ pub trait PartitionedQueue: Sync + Send + Debug {
     fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SendableResult;
 
     async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock>;
+    // fn dequeue(&self, partition_idx: usize) -> SqlResult<SendableDataBlockStream>;
 
     fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<SendableDataBlockStream>;
     fn id(&self) -> usize;
@@ -543,8 +544,11 @@ pub mod tests {
 
     #[tokio::test]
     async fn test_inmem_joiner() {
-        let outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
-        let inner = build_i32_table(vec![("col_a", vec![1, 4, 5]), ("col_c", vec![2, 3, 4])]);
+        let mut outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
+        let mut inner = build_i32_table(vec![
+            ("col_a", vec![1, 4, 3, 5]),
+            ("col_c", vec![2, 3, 4, 1]),
+        ]);
         let on_left = vec![Column::new("col_a", 0)];
         let on_right = vec![Column::new("col_a", 0)];
 
@@ -553,8 +557,28 @@ pub mod tests {
         let (combined_schema, joined_column_indices) =
             super::build_join_schema(&outer.schema(), &inner.schema());
 
+        let ctx = ExecutionContext::new_for_test();
+        let outer_input_stream = Arc::get_mut(&mut outer)
+            .unwrap()
+            .execute(ctx.clone())
+            .await
+            .expect("aa");
+        let outer_data_block = collect(outer_input_stream).await.expect("bb");
+        for item in outer_data_block {
+            out_queue.enqueue(1, item);
+        }
+
+        let inner_input_stream = Arc::get_mut(&mut inner)
+            .unwrap()
+            .execute(ctx.clone())
+            .await
+            .expect("aa");
+        let inner_data_block = collect(inner_input_stream).await.expect("bb");
+        for item in inner_data_block {
+            in_queue.enqueue(1, item);
+        }
+
         let random_state = RandomState::new();
-        let join_column_indices = vec![];
         let mut joined_op = HashJoinOp::new(
             on_left,
             on_right,
@@ -564,9 +588,8 @@ pub mod tests {
             1,
             random_state,
             10,
-            join_column_indices,
+            joined_column_indices,
         );
-        let ctx = ExecutionContext::new_for_test();
         let stream = joined_op
             .execute(ctx.clone())
             .await
@@ -574,8 +597,15 @@ pub mod tests {
         let batches = collect(stream)
             .await
             .expect("failed to collect from joined stream");
-        let st = vec!["", ""];
-        crate::assert_batches_sorted_eq!(st, &batches);
+        let expected = vec![
+            "+-------+-------+-------+-------+",
+            "| col_a | col_b | col_a | col_c |",
+            "+-------+-------+-------+-------+",
+            "| 1     | 2     | 1     | 2     |",
+            "| 3     | 4     | 3     | 4     |",
+            "+-------+-------+-------+-------+",
+        ];
+        crate::assert_batches_sorted_eq!(expected, &batches);
     }
 
     /* fn test_grace_hash_joiner() {
