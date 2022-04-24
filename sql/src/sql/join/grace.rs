@@ -1,4 +1,4 @@
-use super::inmem::{HashJoinOp, HashJoiner};
+use super::inmem::HashJoinOp;
 use crate::sql::{
     exe::{
         DataBlockStream, Executor, Operator, PlanType, SchemaStream, SendableDataBlockStream,
@@ -8,11 +8,12 @@ use crate::sql::{
     DataBlock, ExecutionContext, SqlResult,
 };
 use ahash::RandomState;
-use async_stream::{stream, try_stream};
+use async_stream::stream;
 use datafusion::{
     arrow::{
-        array::Array,
-        datatypes::{DataType, Schema, SchemaRef},
+        array::{Array, PrimitiveArray},
+        compute::kernels::take::take,
+        datatypes::{DataType, Schema, SchemaRef, UInt64Type},
         error::Result as ArrowResult,
     },
     physical_plan::{
@@ -20,7 +21,8 @@ use datafusion::{
         join_utils::{ColumnIndex, JoinSide},
     },
 };
-use futures::{Future, StreamExt};
+use futures::StreamExt;
+use itertools::Itertools;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 #[allow(dead_code)]
@@ -80,7 +82,7 @@ impl Operator for GraceHashJoinOp {
             &self.config,
             true,
         )
-        .await;
+        .await?;
 
         Self::partition_batch(
             &mut left_stream,
@@ -88,7 +90,7 @@ impl Operator for GraceHashJoinOp {
             &self.config,
             false,
         )
-        .await;
+        .await?;
 
         let mut stack: Vec<PartitionLevel> = vec![];
         stack.push(first_level_partitions);
@@ -188,7 +190,7 @@ struct Config {
     bucket_size: usize,
     max_size_per_partition: usize,
     batch_size: usize,
-    left_key_offset: usize,
+    // left_key_offset: usize,
     on_left: Vec<Column>,
     on_right: Vec<Column>,
     outer_schema: SchemaRef,
@@ -236,7 +238,6 @@ impl GraceHashJoinOp {
             bucket_size: 10,
             max_size_per_partition: 10,
             batch_size: 10,
-            left_key_offset: 4,
             on_left: plan.on_left.clone(),
             on_right: plan.on_right.clone(),
             outer_schema: left_op.schema(),
@@ -291,27 +292,24 @@ impl GraceHashJoinOp {
                 c.bucket_size,
             )?;
 
-            // let mut hash_result: Vec<DataBlock> =
-            //     vec![DataBlock::new_empty(batch.schema(), c.bucket_size)];
-
-            //
             let mut buckets = vec![vec![]; c.bucket_size];
-            for (bucket_idx, row) in reused_buffer.iter().enumerate() {
-                buckets[bucket_idx].push(*row as usize);
+            for (row, bucket_idx) in reused_buffer.iter().enumerate() {
+                buckets[*bucket_idx as usize].push(row as u64);
             }
-            let data_by_buckets: ArrowResult<Vec<DataBlock>> = buckets
-                .iter()
-                .map(|same_bucket_rows| batch.project(same_bucket_rows.as_slice()))
-                .collect();
 
-            let data_by_buckets = data_by_buckets?;
+            for (bucket_idx, row_indices) in buckets.into_iter().enumerate() {
+                let indices: PrimitiveArray<UInt64Type> = row_indices.into();
+                let columns = batch
+                    .columns()
+                    .iter()
+                    .map(|c| take(c.as_ref(), &indices, None).map_err(|e| e.into()))
+                    .collect::<SqlResult<Vec<Arc<dyn Array>>>>()?;
 
-            for (bucket_idx, same_buckets) in data_by_buckets.into_iter().enumerate() {
-                let bucket_length = same_buckets.num_rows();
+                let output_batch = DataBlock::try_new(batch.schema(), columns)?;
 
-                queuer.enqueue(bucket_idx, same_buckets).await?;
+                let bucket_length = output_batch.num_rows();
+                queuer.enqueue(bucket_idx, output_batch).await?;
 
-                // only care about inner input, we only need to build hashtable from inner input
                 if is_inner {
                     match partition_infos.map.get_mut(&bucket_idx) {
                         None => {
@@ -483,48 +481,40 @@ impl GraceHashJoinOp {
 
 #[cfg(test)]
 pub mod tests {
-    use super::{Config, GraceHashJoiner, HashJoinOp, HashJoiner, PartitionedQueue};
+    use super::{Config, GraceHashJoinOp, GraceHashJoiner, HashJoinOp, PartitionedQueue};
     use crate::sql::{
-        exe::ExecutionContext,
+        exe::{ExecutionContext, Operator},
         inmem_op::InMemOp,
-        join::{
-            grace::Operator,
-            queue::{Inmem, MemoryAllocator},
-        },
-        util::{collect, RawInput},
+        join::queue::Inmem,
+        util::collect,
         DataBlock,
     };
     use ahash::RandomState;
-    use core::cell::RefCell;
     use datafusion::{
         arrow::{
             array::{Array, Int32Array},
-            datatypes::{
-                DataType::{self, Int8},
-                Field, Schema, SchemaRef,
-            },
+            datatypes::{DataType, Field, Schema, SchemaRef},
         },
         physical_plan::expressions::Column,
     };
-    use itertools::Itertools;
-    use std::{
-        cmp::Ordering::{self, Equal},
-        sync::Arc,
-    };
-    use tokio::task;
-    use zerocopy::{AsBytes, FromBytes};
-
-    macro_rules! make_rows {
-        // Base case:
-        ($a:expr,$b:expr) => {{
-            vec![($a, $b)]
-        }};
-        ($a:expr,$b:expr,$($rest:expr),*) => {{
-            [vec![($a,$b)],make_rows!($($rest),*)].concat()
-        }};
-    }
+    use std::sync::Arc;
 
     struct RowType(i64, Vec<u8>);
+    fn build_i32_table_box(cols_and_values: Vec<(&str, Vec<i32>)>) -> Box<dyn Operator> {
+        let field_vec = cols_and_values
+            .iter()
+            .map(|(col_name, _)| Field::new(col_name, DataType::Int32, false))
+            .collect::<Vec<_>>();
+        let schema = Arc::new(Schema::new(field_vec));
+        let batches = cols_and_values
+            .iter()
+            .map(|(_, values_for_this_cols)| {
+                Arc::new(Int32Array::from(values_for_this_cols.clone())) as Arc<dyn Array>
+            })
+            .collect::<Vec<_>>();
+        let batch: DataBlock = DataBlock::try_new(schema.clone(), batches).unwrap();
+        Box::new(InMemOp::new(schema, vec![batch]))
+    }
 
     fn build_i32_table(cols_and_values: Vec<(&str, Vec<i32>)>) -> Arc<dyn Operator> {
         let field_vec = cols_and_values
@@ -542,10 +532,24 @@ pub mod tests {
         Arc::new(InMemOp::new(schema, vec![batch]))
     }
 
+    async fn collect_batch_from_op(
+        mut op: Arc<dyn Operator>,
+        ctx: ExecutionContext,
+    ) -> Vec<DataBlock> {
+        let outer_input_stream = Arc::get_mut(&mut op)
+            .unwrap()
+            .execute(ctx.clone())
+            .await
+            .expect("failed to execute operator");
+        collect(outer_input_stream)
+            .await
+            .expect("failed to collect output")
+    }
+
     #[tokio::test]
     async fn test_inmem_joiner() {
-        let mut outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
-        let mut inner = build_i32_table(vec![
+        let outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
+        let inner = build_i32_table(vec![
             ("col_a", vec![1, 4, 3, 5]),
             ("col_c", vec![2, 3, 4, 1]),
         ]);
@@ -558,23 +562,14 @@ pub mod tests {
             super::build_join_schema(&outer.schema(), &inner.schema());
 
         let ctx = ExecutionContext::new_for_test();
-        let outer_input_stream = Arc::get_mut(&mut outer)
-            .unwrap()
-            .execute(ctx.clone())
-            .await
-            .expect("aa");
-        let outer_data_block = collect(outer_input_stream).await.expect("bb");
-        for item in outer_data_block {
+        let outer_batches = collect_batch_from_op(outer, ctx.clone()).await;
+        let inner_batches = collect_batch_from_op(inner, ctx.clone()).await;
+
+        for item in outer_batches {
             out_queue.enqueue(1, item);
         }
 
-        let inner_input_stream = Arc::get_mut(&mut inner)
-            .unwrap()
-            .execute(ctx.clone())
-            .await
-            .expect("aa");
-        let inner_data_block = collect(inner_input_stream).await.expect("bb");
-        for item in inner_data_block {
+        for item in inner_batches {
             in_queue.enqueue(1, item);
         }
 
@@ -608,91 +603,48 @@ pub mod tests {
         crate::assert_batches_sorted_eq!(expected, &batches);
     }
 
-    /* fn test_grace_hash_joiner() {
-        struct TestCase {
-            outer: Vec<(i64, &'static str)>,
-            inner: Vec<(i64, &'static str)>,
-            expect: Vec<(i64, &'static str)>,
-        }
-        // we expect the inner to be hashed, so we can't guarantee order of the rows returned
-        let tcases = vec![
-            TestCase {
-                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
-                inner: make_rows!(1, "a2", 2, "b2"),
-                expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2"),
-            },
-            TestCase {
-                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
-                inner: make_rows!(1, "a2", 2, "b2", 1, "a3", 3, "c2"),
-                expect: make_rows!(1, "a1a2", 2, "b1b2", 1, "c1a2", 1, "a1a3", 1, "c1a3"),
-            },
-            TestCase {
-                outer: make_rows!(1, "a1", 2, "b1", 1, "c1"),
-                inner: make_rows!(1, "a2", 2, "b2", 1, "a3", 3, "c2", 3, "c2", 2, "b2"),
-                expect: make_rows!(
-                    1, "a1a2", 2, "b1b2", 1, "c1a2", 1, "a1a3", 1, "c1a3", 2, "b1b2"
-                ),
-            },
+    #[tokio::test]
+    async fn test_grace_hash_joiner() {
+        let outer = build_i32_table_box(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
+        let inner = build_i32_table_box(vec![
+            ("col_a", vec![1, 4, 3, 5]),
+            ("col_c", vec![2, 3, 4, 1]),
+        ]);
+        let on_left = vec![Column::new("col_a", 0)];
+        let on_right = vec![Column::new("col_a", 0)];
+        let conf = Config {
+            bucket_size: 10,
+            max_size_per_partition: 2,
+            batch_size: 2,
+            on_left,
+            on_right,
+            outer_schema: outer.schema(),
+            inner_schema: inner.schema(),
+        };
+        let (combined_schema, joined_column_indices) =
+            super::build_join_schema(&outer.schema(), &inner.schema());
+        let ctx = ExecutionContext::new_for_test();
+
+        let mut hj = GraceHashJoinOp::new(
+            conf,
+            outer,
+            inner,
+            joined_column_indices,
+            Arc::new(combined_schema),
+        )
+        .expect("failted to create grace hash joiner");
+        let stream = hj.execute(ctx.clone()).await.expect("executing join op");
+        let batches = collect(stream)
+            .await
+            .expect("failed to collect from joined stream");
+        let expected = vec![
+            "+-------+-------+-------+-------+",
+            "| col_a | col_b | col_a | col_c |",
+            "+-------+-------+-------+-------+",
+            "| 1     | 2     | 1     | 2     |",
+            "| 3     | 4     | 3     | 4     |",
+            "+-------+-------+-------+-------+",
         ];
-        for item in &tcases {
-            let batch_size = 2;
-            let left_key_offset = 8; // first 8 bytes represents join key
-            let right_key_offset = 8;
-
-            let mut outer_batches = Vec::new();
-            for chunk in &item.outer.iter().chunks(batch_size) {
-                let mut rows = Vec::new();
-                for item in chunk {
-                    rows.push(make_i64s_row((item.0, item.1.as_bytes())));
-                }
-                outer_batches.push(Batch::new(rows));
-            }
-            let mut inner_batches = Vec::new();
-            for chunk in &item.inner.iter().chunks(batch_size) {
-                let mut rows = Vec::new();
-                for item in chunk {
-                    rows.push(make_i64s_row((item.0, item.1.as_bytes())));
-                }
-                inner_batches.push(Batch::new(rows));
-            }
-            let alloc = RefCell::new(MemoryAllocator::new());
-
-            let config = Config {
-                bucket_size: 2,
-                max_size_per_partition: 2,
-                batch_size: 2,
-            };
-            let mut joiner = GraceHashJoiner::new(
-                config,
-                Box::new(RawInput::new_from_batch(outer_batches)),
-                Box::new(RawInput::new_from_batch(inner_batches)),
-                || -> Arc<dyn PartitionedQueue> { alloc.borrow_mut().alloc() },
-            )
-            .expect("creating gracehashjoiner");
-            let mut ret: Vec<(i64, Vec<u8>)> = Vec::new();
-            // joined result should be 1,1|1,1|1,1|1,1
-            while let Some(b) = joiner.next_batch() {
-                for row in b.data() {
-                    let joined_key = FromBytes::read_from(&row.inner[..8]).unwrap();
-                    let other_data = row.inner[8..].to_vec();
-                    // let other_data = FromBytes::read_from(&row.inner[8..]).unwrap();
-                    ret.push((joined_key, other_data));
-                }
-            }
-            // let expect = [[1, 1], [1, 1], [1, 1], [1, 1]];
-            ret.sort_by(|a, b| cmp_row(a, b));
-            let mut expect: Vec<(i64, Vec<u8>)> = item
-                .expect
-                .iter()
-                .map(|item| (item.0, item.1.as_bytes().to_vec()))
-                .collect();
-            expect.sort_by(|a, b| cmp_row(a, b));
-
-            assert_eq!(expect.len(), ret.len(), "wrong number of rows returned");
-            let equal = expect.iter().zip(ret.iter()).all(|(expect, real)| {
-                compare_row(expect.1.as_bytes().iter(), real.1.as_bytes().iter())
-            });
-            assert!(equal);
-        }
-    } */
+        crate::assert_batches_sorted_eq!(expected, &batches);
+    }
 }
