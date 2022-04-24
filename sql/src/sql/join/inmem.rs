@@ -1,29 +1,31 @@
 use crate::sql::{
     exe::{
-        DataBlockStream, ExecutionContext, Executor, Operator, PlanType, SchemaStream,
+        DataBlockStream, ExecutionContext, Operator, PlanType, SchemaStream,
         SendableDataBlockStream,
     },
     join::{
         grace::PartitionedQueue,
         hash_util::{create_hashes, hash_to_buckets},
     },
-    ColumnInfo, DataBlock, Error as SqlError, Schema, SqlResult,
+    DataBlock, Error as SqlError, SqlResult,
 };
 use ahash::RandomState;
-use arrow::{
-    array::{
-        Array, ArrayData, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array,
-        Int32Array, Int64Array, Int8Array, LargeStringArray, PrimitiveArray, StringArray,
-        TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
-        TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt64BufferBuilder,
-        UInt8Array,
+use datafusion::{
+    arrow::{
+        array::{
+            Array, ArrayData, ArrayRef, BooleanArray, Float32Array, Float64Array, Int16Array,
+            Int32Array, Int64Array, Int8Array, LargeStringArray, PrimitiveArray, StringArray,
+            TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+            TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array, UInt64BufferBuilder,
+            UInt8Array,
+        },
+        compute::take,
+        datatypes::{DataType, Schema, SchemaRef, TimeUnit, UInt64Type},
     },
-    compute::take,
-    datatypes::{DataType, SchemaRef, TimeUnit, UInt64Type},
-};
-use datafusion::physical_plan::{
-    expressions::Column,
-    join_utils::{ColumnIndex, JoinSide},
+    physical_plan::{
+        expressions::Column,
+        join_utils::{ColumnIndex, JoinSide},
+    },
 };
 // use futures::{Stream, StreamExt};
 use futures_core::Stream;
@@ -143,14 +145,14 @@ impl Stream for HashJoiner {
                             }
                         }
                     }
-                    let inner = ArrayData::builder(arrow::datatypes::DataType::UInt64)
+                    let inner = ArrayData::builder(DataType::UInt64)
                         .len(inner_indices.len())
                         .add_buffer(inner_indices.finish())
                         .build()
                         .unwrap();
                     let inner_indices = PrimitiveArray::<UInt64Type>::from(inner);
 
-                    let outer = ArrayData::builder(arrow::datatypes::DataType::UInt64)
+                    let outer = ArrayData::builder(DataType::UInt64)
                         .len(outer_indices.len())
                         .add_buffer(outer_indices.finish())
                         .build()
@@ -213,7 +215,6 @@ impl HashJoinOp {
         offset: usize,
         reused_hash_buffer: &mut Vec<u64>,
     ) -> SqlResult<()> {
-        // let columnar_values: Vec<Column> = batch.columns;
         let joined_columnar = Self::make_joined_columes(joined_on, batch);
         let hash_values = create_hashes(
             &joined_columnar,
@@ -249,12 +250,19 @@ impl HashJoinOp {
             &inner_batch,
             offset,
             &mut hash_buffer,
-        );
+        )?;
         self.built = true;
         Ok((inner_batch, join_table))
     }
 }
 
+/// For example
+/// outer: [1,2,3,4] [...] [...]
+/// inner: [2,3,4,5] [...]
+/// outer_indices:  [1,2,3] (since 2,3,4 match)
+/// inner_indices:  [0,1,2] (since 2,3,4 match)
+/// column_indices: [(0,left),(1,left),(2,left),(0,right),(1,right)]:
+/// => Result:  
 fn build_batch_from_indices(
     schema: &SchemaRef,
     outer: &DataBlock,

@@ -1,20 +1,22 @@
-use crate::sql::{
-    insert::{Insert, InsertPlan},
-    join::{
-        grace::{GraceHashJoinOp, GraceHashJoinPlan, PartitionedQueue},
-        queue::MemoryAllocator,
+use crate::{
+    sql::{
+        insert::InsertPlan,
+        join::{
+            grace::{GraceHashJoinOp, GraceHashJoinPlan, PartitionedQueue},
+            queue::MemoryAllocator,
+        },
+        scan::SeqScanPlan,
+        tx::Txn,
+        util::RawInput,
+        DataBlock, SqlResult,
     },
-    scan::{SeqScanPlan, SeqScanner},
-    tx::Txn,
-    util::RawInput,
-    DataBlock, Schema, SqlResult, TableMeta,
+    storage::sled::Sled,
 };
-use arrow::datatypes::SchemaRef;
-use async_stream::AsyncStream;
 use async_trait::async_trait;
-use core::cell::RefCell;
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use futures::{stream::Stream, Future};
-use std::{fmt::Debug, pin::Pin, rc::Rc, sync::Arc};
+use std::{env::temp_dir, fmt::Debug, pin::Pin, rc::Rc, sync::Arc};
+use tempfile::{tempfile, NamedTempFile};
 
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -25,6 +27,19 @@ pub struct ExecutionContext {
 }
 
 impl ExecutionContext {
+    pub fn new_for_test() -> Self {
+        let inmem = MemoryAllocator::new();
+        // let temp = tempfile().expect();
+        let file = NamedTempFile::new().expect("failed creating temp file");
+        let path = file.into_temp_path().to_str().unwrap().to_string();
+        let db = Sled::new(path).expect("failed creating sled");
+
+        ExecutionContext {
+            txn: Txn {},
+            storage: Arc::new(db),
+            queue: Arc::new(inmem),
+        }
+    }
     pub fn new(store: Arc<dyn Storage>) -> Self {
         let inmem = MemoryAllocator::new();
         ExecutionContext {
@@ -50,7 +65,11 @@ impl ExecutionContext {
 pub trait DataBlockStream: Stream<Item = SqlResult<DataBlock>> {
     fn schema(self) -> SchemaRef;
 }
+
+/// Trait for types that stream [arrow::record_batch::RecordBatch]
 pub type SendableDataBlockStream = Pin<Box<dyn DataBlockStream + Send + Sync>>;
+
+pub type SendableResult = Pin<Box<dyn Future<Output = SqlResult<()>> + Send + Sync>>;
 pub struct SchemaStream {
     inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>> + Send + Sync>>,
     schema: SchemaRef,
@@ -162,9 +181,9 @@ impl Executor {
     }
 }
 pub trait Catalog {
-    fn create_table(&self, tablename: String, schema: Schema) -> SqlResult<TableMeta>;
+    /* fn create_table(&self, tablename: String, schema: Schema) -> SqlResult<TableMeta>;
 
-    fn get_table(&self, tablename: String) -> SqlResult<TableMeta>;
+    fn get_table(&self, tablename: String) -> SqlResult<TableMeta>; */
 }
 
 pub type RID = u64;
@@ -185,12 +204,7 @@ pub trait Storage: Catalog + Sync + Send {
         rids: SendableDataBlockStream,
         txn: &Txn,
     ) -> SqlResult<SendableDataBlockStream>;
-    async fn get_tuple(
-        &self,
-        table: &str,
-        rid: RID,
-        txn: &Txn,
-    ) -> SqlResult<SendableDataBlockStream>;
+
     async fn scan(&self, table: &str, txn: &Txn) -> SqlResult<SendableDataBlockStream>;
 }
 
@@ -202,46 +216,18 @@ pub mod tests {
             exe::{Executor, PlanType},
             scan::SeqScanPlan,
             table_gen::GenTableUtil,
-            ColumnInfo, ExecutionContext, Schema,
+            ExecutionContext,
         },
         storage::sled::Sled,
     };
-    use std::{env::current_dir, rc::Rc};
+    use std::{env::current_dir, rc::Rc, sync::Arc};
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_seq_scan() {
-        // let dep = setup();
-        // let mut cur_dir = current_dir().expect("failed getting current dir");
-        // let file = format!("{}/test_data/test_1.json", cur_dir.to_str().unwrap());
-        // println!("file {}", file);
-        // dep.gen_table.gen(file).expect("failed generating table");
-        // let executor = dep.executor;
-        // let table_meta = dep
-        //     .storage
-        //     .get_table("test_1".to_string())
-        //     .expect("failed to get catalog");
-        // let schema = table_meta.schema;
-
-        // let cols = vec![
-        //     ColumnInfo::new("colA", schema.get_type("colA")),
-        //     ColumnInfo::new("colB", schema.get_type("colB")),
-        // ];
-
-        // let out_schema = Schema { columns: cols };
-
-        // let seq_scan_plan = SeqScanPlan {
-        //     table: "test_1".to_string(),
-        //     out_schema,
-        // };
-        // let ctx = ExecutionContext::new(dep.storage.clone());
-        // let ret = Executor::execute(PlanType::SeqScan(seq_scan_plan), ctx)
-        //     .expect("failed executing seq scan");
-        // for item in ret.rows {}
-    }
+    fn test_seq_scan() {}
 
     pub struct Dependencies {
-        storage: Rc<dyn Storage>,
+        storage: Arc<dyn Storage>,
         executor: Executor,
         gen_table: GenTableUtil,
     }
@@ -250,7 +236,7 @@ pub mod tests {
         let file = NamedTempFile::new().expect("failed creating temp file");
         let path = file.into_temp_path().to_str().unwrap().to_string();
         let db = Sled::new(path).expect("failed creating sled");
-        let cloned = Rc::new(db);
+        let cloned = Arc::new(db);
         Dependencies {
             storage: cloned.clone(),
             executor: Executor {},

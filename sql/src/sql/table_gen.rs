@@ -1,9 +1,6 @@
-use crate::sql::{exe::ExecutionContext, tx::Txn, DataType, Schema, SqlResult};
-use datafusion::physical_plan::expressions::Column;
+use crate::sql::{exe::ExecutionContext, tx::Txn, DataType, SqlResult};
 // use itertools::Itertools;
-use rand::distributions::{Distribution, Uniform};
 use serde_derive::{Deserialize, Serialize};
-use std::{any::Any, cmp::min};
 
 pub struct GenTableUtil {
     pub ctx: ExecutionContext,

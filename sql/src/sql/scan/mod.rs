@@ -1,5 +1,5 @@
-use crate::sql::{exe::Operator, ExecutionContext, Schema, SqlResult};
-use arrow::datatypes::SchemaRef;
+use crate::sql::{exe::Operator, ExecutionContext, SqlResult};
+use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use std::sync::Arc;
 
 use super::exe::SendableDataBlockStream;
