@@ -20,7 +20,7 @@ use datafusion::{
             UInt8Array,
         },
         compute::take,
-        datatypes::{DataType, Schema, SchemaRef, TimeUnit, UInt64Type},
+        datatypes::{DataType, SchemaRef, TimeUnit, UInt64Type},
     },
     physical_plan::{
         expressions::Column,
@@ -61,9 +61,26 @@ impl Operator for HashJoinOp {
         self.schema.clone()
     }
     async fn execute(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        let (inner_data, inner_table) = self._build().await?;
+        let mut inner_table = JoinedTable::new();
+        let inner_data = self.inner_queue.dequeue_all(self.p_index).await?;
+
+        let mut hash_buffer = Vec::new();
+        let offset = 0;
+        hash_buffer.clear();
+        hash_buffer.resize(inner_data.num_rows(), 0);
+        Self::hash_batch_and_store(
+            &self.on_right,
+            &mut inner_table,
+            &inner_data,
+            offset,
+            &mut hash_buffer,
+            &self.random_state,
+        )?;
+        // Ok((inner_batch, join_table))
+
         let outer_stream: SendableDataBlockStream =
             self.outer_queue.dequeue(self.p_index, self.batch_size)?;
+
         return Ok(Box::pin(HashJoiner {
             outer_stream,
             on_left: self.on_left.clone(),
@@ -75,7 +92,16 @@ impl Operator for HashJoinOp {
             schema: self.schema.clone(),
         }));
     }
-    fn execute_sync(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+        /* let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let moved_ctx2 = ctx.clone();
+        tokio::spawn(async move {
+            let mut inmem_stream = self.execute(moved_ctx2).await;
+            tx.send(inmem_stream).await;
+        });
+        let mut inmem_stream = rx.recv().await.expect("something").expect("something else"); */
+
         todo!()
     }
 }
@@ -110,7 +136,6 @@ impl Stream for HashJoiner {
                 Some(batch) => {
                     let outer_batch: DataBlock = batch?;
 
-                    println!("batch : {:?}", outer_batch);
                     let outer_joined_values = self
                         .on_left
                         .iter()
@@ -235,23 +260,27 @@ impl HashJoinOp {
         Ok(())
     }
 
-    async fn _build(&mut self) -> SqlResult<(DataBlock, JoinedTable)> {
+    async fn _build<'a>(
+        p_index: usize,
+        inner_queue: Arc<dyn PartitionedQueue>,
+        random_state: &'a RandomState,
+        on_right: &'a Vec<Column>,
+    ) -> SqlResult<(DataBlock, JoinedTable)> {
         let mut join_table = JoinedTable::new();
-        let inner_batch = self.inner_queue.dequeue_all(self.p_index).await?;
+        let inner_batch = inner_queue.dequeue_all(p_index).await?;
 
         let mut hash_buffer = Vec::new();
         let offset = 0;
         hash_buffer.clear();
         hash_buffer.resize(inner_batch.num_rows(), 0);
         Self::hash_batch_and_store(
-            &self.on_right,
+            on_right,
             &mut join_table,
             &inner_batch,
             offset,
             &mut hash_buffer,
-            &self.random_state,
+            random_state,
         )?;
-        self.built = true;
         Ok((inner_batch, join_table))
     }
 }

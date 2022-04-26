@@ -154,11 +154,7 @@ impl Executor {
             PlanType::RawInput(raw) => Box::new(raw), */
             PlanType::GraceHashJoin(plan) => {
                 let cloned = ctx.clone();
-                Box::new(GraceHashJoinOp::from_plan(
-                    plan,
-                    // move || -> Rc<dyn PartitionedQueue> { cloned.new_queue() },
-                    ctx.clone(),
-                ))
+                Box::new(GraceHashJoinOp::from_plan(plan, ctx.clone()))
             }
             _ => {
                 todo!("todo")

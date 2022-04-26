@@ -3,7 +3,6 @@ use crate::sql::{
     join::grace::PartitionedQueue,
     DataBlock, SqlResult,
 };
-use async_stream::stream;
 use datafusion::arrow::datatypes::SchemaRef;
 use futures::Stream;
 use parking_lot::Mutex;
@@ -132,7 +131,7 @@ impl PartitionedQueue for Inmem {
     fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<SendableDataBlockStream> {
         let mut inner = self.inner.borrow_mut();
         match inner.remove(&partition_idx) {
-            None => Err("nooooo".to_string())?,
+            None => Err(format!("partition {} does not exist", partition_idx))?,
             Some(exist) => {
                 let fut = DequeueFut { all: exist };
                 Ok(SchemaStream::new(self.schema.clone(), Box::pin(fut)))
