@@ -13,8 +13,7 @@ use datafusion::{
     arrow::{
         array::{Array, PrimitiveArray},
         compute::kernels::take::take,
-        datatypes::{DataType, Schema, SchemaRef, UInt64Type},
-        error::Result as ArrowResult,
+        datatypes::{Schema, SchemaRef, UInt64Type},
     },
     physical_plan::{
         expressions::Column,
@@ -22,7 +21,6 @@ use datafusion::{
     },
 };
 use futures::StreamExt;
-use itertools::Itertools;
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 #[allow(dead_code)]
@@ -48,13 +46,13 @@ pub struct GraceHashJoinOp {
 unsafe impl Send for GraceHashJoinOp {}
 unsafe impl Sync for GraceHashJoinOp {}
 
-pub struct GraceHashJoiner {
+/* pub struct GraceHashJoiner {
     ctx: ExecutionContext,
     config: Config,
     stack: Vec<PartitionLevel>,
     join_column_indices: Vec<ColumnIndex>,
     schema: SchemaRef,
-}
+} */
 
 #[async_trait::async_trait]
 impl Operator for GraceHashJoinOp {
@@ -66,6 +64,8 @@ impl Operator for GraceHashJoinOp {
     async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
         let outer_queue = ctx.new_queue(self.config.outer_schema.clone());
         let inner_queue = ctx.new_queue(self.config.inner_schema.clone());
+
+        println!("addr of outer_queue {:p}", outer_queue);
         let map = HashMap::new();
         let mut first_level_partitions = PartitionLevel {
             fallback_partitions: vec![],
@@ -119,7 +119,17 @@ impl Operator for GraceHashJoinOp {
 
                         // I used execute_sync because awaiting for a future inside this macro
                         // requires the future to be sync, i don't know how to do that yet
-                        let mut inmem_stream = inmem_joiner.execute_sync(moved_ctx.clone())?;
+                        // let mut inmem_stream = inmem_joiner.execute_sync(moved_ctx.clone())?;
+                        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                        let moved_ctx2 = moved_ctx.clone();
+                        tokio::spawn(async move{
+                            let  inmem_stream = inmem_joiner.execute(moved_ctx2).await;
+                            match tx.send(inmem_stream).await{
+                                Err(some_err) => panic!(some_err),
+                                Ok(_) => {},
+                            }
+                        });
+                        let mut inmem_stream = rx.recv().await.expect("error receiving from channel").expect("inmem_joiner.execute");
                         while let Some(batch_ret) = inmem_stream.next().await {
                             yield batch_ret;
                         }
@@ -168,14 +178,12 @@ struct PartitionLevel {
 
 #[async_trait::async_trait]
 pub trait PartitionedQueue: Sync + Send + Debug {
-    // async fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SqlResult<()>;
-
     fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SendableResult;
 
     async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock>;
-    // fn dequeue(&self, partition_idx: usize) -> SqlResult<SendableDataBlockStream>;
 
     fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<SendableDataBlockStream>;
+
     fn id(&self) -> usize;
 }
 
@@ -190,7 +198,6 @@ struct Config {
     bucket_size: usize,
     max_size_per_partition: usize,
     batch_size: usize,
-    // left_key_offset: usize,
     on_left: Vec<Column>,
     on_right: Vec<Column>,
     outer_schema: SchemaRef,
@@ -251,7 +258,6 @@ impl GraceHashJoinOp {
             default_config,
             left_op,
             right_op,
-            // move || -> Arc<dyn PartitionedQueue> { ctx.new_queue() },
             column_indices,
             Arc::new(schema),
         )
@@ -365,12 +371,15 @@ impl GraceHashJoinOp {
         }
         match found_index {
             None => None,
-            Some(index) => Some((
-                index,
-                partition_infos.level,
-                partition_infos.outer_queue.clone(),
-                partition_infos.inner_queue.clone(),
-            )),
+            Some(index) => {
+                partition_infos.map.remove(&index).unwrap();
+                Some((
+                    index,
+                    partition_infos.level,
+                    partition_infos.outer_queue.clone(),
+                    partition_infos.inner_queue.clone(),
+                ))
+            }
         }
     }
 
@@ -481,7 +490,7 @@ impl GraceHashJoinOp {
 
 #[cfg(test)]
 pub mod tests {
-    use super::{Config, GraceHashJoinOp, GraceHashJoiner, HashJoinOp, PartitionedQueue};
+    use super::{Config, GraceHashJoinOp, HashJoinOp, PartitionedQueue};
     use crate::sql::{
         exe::{ExecutionContext, Operator},
         inmem_op::InMemOp,
@@ -493,7 +502,7 @@ pub mod tests {
     use datafusion::{
         arrow::{
             array::{Array, Int32Array},
-            datatypes::{DataType, Field, Schema, SchemaRef},
+            datatypes::{DataType, Field, Schema},
         },
         physical_plan::expressions::Column,
     };
