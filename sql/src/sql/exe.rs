@@ -21,7 +21,6 @@ use tempfile::{tempfile, NamedTempFile};
 #[derive(Clone)]
 pub struct ExecutionContext {
     storage: Arc<dyn Storage>,
-    // bpm: Rc<BufferPoolManager>,
     pub txn: Txn,
     queue: Arc<MemoryAllocator>, // TODO: make this into a trait object
 }
