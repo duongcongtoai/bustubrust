@@ -1,15 +1,13 @@
 use crate::sql::{
-    exe::{SchemaStream, SendableDataBlockStream, SendableResult},
+    exe::{BoxedDataIter, SchemaStream},
     join::grace::PartitionedQueue,
     DataBlock, SqlResult,
 };
 use datafusion::arrow::datatypes::SchemaRef;
-use futures::Stream;
 use parking_lot::Mutex;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
-    pin::Pin,
     sync::Arc,
     task::{Context, Poll},
 };
@@ -73,14 +71,11 @@ pub struct DequeueFut {
 unsafe impl Send for DequeueFut {}
 unsafe impl Sync for DequeueFut {}
 
-impl Stream for DequeueFut {
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        ctx: &mut Context<'_>,
-    ) -> Poll<std::option::Option<Self::Item>> {
+impl Iterator for DequeueFut {
+    fn next(&mut self) -> Option<Self::Item> {
         match self.all.pop_front() {
-            None => Poll::Ready(None),
-            Some(record) => Poll::Ready(Some(Ok(record))),
+            None => None,
+            Some(record) => Some(Ok(record)),
         }
     }
     type Item = SqlResult<DataBlock>;
@@ -89,12 +84,11 @@ impl Stream for DequeueFut {
 unsafe impl Send for Inmem {}
 unsafe impl Sync for Inmem {}
 
-#[async_trait::async_trait]
 impl PartitionedQueue for Inmem {
     fn id(&self) -> usize {
         self.id
     }
-    fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SendableResult {
+    fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SqlResult<()> {
         let mut inner = self.inner.borrow_mut();
         match inner.get_mut(&partition_idx) {
             None => {
@@ -106,10 +100,10 @@ impl PartitionedQueue for Inmem {
                 exist.push_back(data);
             }
         }
-        Box::pin(async { Ok(()) })
+        Ok(())
     }
 
-    async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock> {
+    fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock> {
         let mut inner = self.inner.borrow_mut();
         let ret = DataBlock::new_empty(self.schema.clone());
         match inner.get_mut(&partition_idx) {
@@ -128,13 +122,13 @@ impl PartitionedQueue for Inmem {
         }
     }
 
-    fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<SendableDataBlockStream> {
+    fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<BoxedDataIter> {
         let mut inner = self.inner.borrow_mut();
         match inner.remove(&partition_idx) {
             None => Err(format!("partition {} does not exist", partition_idx))?,
             Some(exist) => {
                 let fut = DequeueFut { all: exist };
-                Ok(SchemaStream::new(self.schema.clone(), Box::pin(fut)))
+                Ok(SchemaStream::new(self.schema.clone(), Box::new(fut)))
             }
         }
     }

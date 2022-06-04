@@ -1,8 +1,13 @@
-use super::{exe::SendableDataBlockStream, SqlResult};
+use std::{
+    ops::{Generator, GeneratorState},
+    pin::Pin,
+};
+
+use super::{exe::BoxedDataIter, SqlResult};
 use crate::sql::DataBlock;
 use comfy_table::{Cell, Table};
 use datafusion::arrow::util::display::array_value_to_string;
-use futures::TryStreamExt;
+// use futures::TryStreamExt;
 
 /// Util struct to create impl of Operator from raw input
 pub struct RawInput {
@@ -10,8 +15,9 @@ pub struct RawInput {
 }
 
 /// Create a vector of record batches from a stream
-pub async fn collect(stream: SendableDataBlockStream) -> SqlResult<Vec<DataBlock>> {
-    stream.try_collect::<Vec<_>>().await
+pub fn collect(stream: BoxedDataIter) -> SqlResult<Vec<DataBlock>> {
+    stream.collect()
+    // stream.try_collect::<Vec<_>>().await
 }
 
 pub fn create_pretty_print_table(batches: &[DataBlock]) -> SqlResult<Table> {
@@ -72,4 +78,29 @@ macro_rules! assert_batches_sorted_eq {
             expected_lines, actual_lines
         );
     };
+}
+
+pub struct GeneratorIteratorAdapter<G>(Pin<Box<G>>);
+
+impl<G> GeneratorIteratorAdapter<G>
+where
+    G: Generator<Return = ()>,
+{
+    pub fn new(gen: G) -> Self {
+        Self(Box::pin(gen))
+    }
+}
+
+impl<G> Iterator for GeneratorIteratorAdapter<G>
+where
+    G: Generator<Return = ()>,
+{
+    type Item = G::Yield;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.0.as_mut().resume(()) {
+            GeneratorState::Yielded(x) => Some(x),
+            GeneratorState::Complete(_) => None,
+        }
+    }
 }

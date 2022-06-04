@@ -1,8 +1,5 @@
 use crate::sql::{
-    exe::{
-        DataBlockStream, ExecutionContext, Operator, PlanType, SchemaStream,
-        SendableDataBlockStream,
-    },
+    exe::{BoxedDataIter, DataBlockStream, ExecutionContext, Operator, PlanType, SchemaStream},
     join::{
         grace::PartitionedQueue,
         hash_util::{create_hashes, hash_to_buckets},
@@ -55,14 +52,13 @@ pub struct HashJoinOp {
     random_state: RandomState,
 }
 
-#[async_trait::async_trait]
 impl Operator for HashJoinOp {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
-    async fn execute(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+    fn execute_sync(&mut self, _: ExecutionContext) -> SqlResult<BoxedDataIter> {
         let mut inner_table = JoinedTable::new();
-        let inner_data = self.inner_queue.dequeue_all(self.p_index).await?;
+        let inner_data = self.inner_queue.dequeue_all(self.p_index)?;
 
         let mut hash_buffer = Vec::new();
         let offset = 0;
@@ -78,10 +74,10 @@ impl Operator for HashJoinOp {
         )?;
         // Ok((inner_batch, join_table))
 
-        let outer_stream: SendableDataBlockStream =
+        let outer_stream: BoxedDataIter =
             self.outer_queue.dequeue(self.p_index, self.batch_size)?;
 
-        return Ok(Box::pin(HashJoiner {
+        return Ok(Box::new(HashJoiner {
             outer_stream,
             on_left: self.on_left.clone(),
             on_right: self.on_right.clone(),
@@ -92,22 +88,10 @@ impl Operator for HashJoinOp {
             schema: self.schema.clone(),
         }));
     }
-
-    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        /* let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let moved_ctx2 = ctx.clone();
-        tokio::spawn(async move {
-            let mut inmem_stream = self.execute(moved_ctx2).await;
-            tx.send(inmem_stream).await;
-        });
-        let mut inmem_stream = rx.recv().await.expect("something").expect("something else"); */
-
-        todo!()
-    }
 }
 
 pub struct HashJoiner {
-    outer_stream: SendableDataBlockStream,
+    outer_stream: BoxedDataIter,
     on_left: Vec<Column>,
     on_right: Vec<Column>,
     inner_data: DataBlock,
@@ -125,79 +109,81 @@ impl DataBlockStream for HashJoiner {
     }
 }
 
-impl Stream for HashJoiner {
+impl Iterator for HashJoiner {
     type Item = SqlResult<DataBlock>;
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::option::Option<Self::Item>> {
-        match self.outer_stream.poll_next_unpin(cx) {
-            Poll::Ready(maybe_batch) => match maybe_batch {
-                Some(batch) => {
-                    let outer_batch: DataBlock = batch?;
 
-                    let outer_joined_values = self
-                        .on_left
-                        .iter()
-                        .map(|c| outer_batch.column(c.index()).clone())
-                        .collect::<Vec<_>>();
-                    let inner_join_values = self
-                        .on_right
-                        .iter()
-                        .map(|c| self.inner_data.column(c.index()).clone())
-                        .collect::<Vec<_>>();
-                    let mut hash_buffer = vec![0; outer_joined_values[0].len()];
-                    let outer_hash_values =
-                        create_hashes(&outer_joined_values, &self.hash_state, &mut hash_buffer)?;
-                    let mut outer_indices = UInt64BufferBuilder::new(0);
-                    let mut inner_indices = UInt64BufferBuilder::new(0);
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.outer_stream.next() {
+            Some(batch_ret) => {
+                match batch_ret {
+                    Ok(outer_batch) => {
+                        let outer_joined_values = self
+                            .on_left
+                            .iter()
+                            .map(|c| outer_batch.column(c.index()).clone())
+                            .collect::<Vec<_>>();
+                        let inner_join_values = self
+                            .on_right
+                            .iter()
+                            .map(|c| self.inner_data.column(c.index()).clone())
+                            .collect::<Vec<_>>();
+                        let mut hash_buffer = vec![0; outer_joined_values[0].len()];
+                        let outer_hash_values =
+                            create_hashes(&outer_joined_values, &self.hash_state, &mut hash_buffer)
+                                .unwrap();
+                        let mut outer_indices = UInt64BufferBuilder::new(0);
+                        let mut inner_indices = UInt64BufferBuilder::new(0);
 
-                    for (outer_row, hash_value) in outer_hash_values.iter().enumerate() {
-                        if let Some((_, indices)) = self
-                            .inner_table
-                            .get(*hash_value, |(hash, _)| *hash_value == *hash)
-                        {
-                            // equal hash, need to check real value
-                            for inner_row in indices {
-                                if equal_rows(
-                                    *inner_row as usize,
-                                    outer_row,
-                                    &inner_join_values,
-                                    &outer_joined_values,
-                                    false,
-                                )? {
-                                    outer_indices.append(outer_row as u64);
-                                    inner_indices.append(*inner_row as u64);
+                        for (outer_row, hash_value) in outer_hash_values.iter().enumerate() {
+                            if let Some((_, indices)) = self
+                                .inner_table
+                                .get(*hash_value, |(hash, _)| *hash_value == *hash)
+                            {
+                                // equal hash, need to check real value
+                                for inner_row in indices {
+                                    if equal_rows(
+                                        *inner_row as usize,
+                                        outer_row,
+                                        &inner_join_values,
+                                        &outer_joined_values,
+                                        false,
+                                    )
+                                    .unwrap()
+                                    {
+                                        outer_indices.append(outer_row as u64);
+                                        inner_indices.append(*inner_row as u64);
+                                    }
                                 }
                             }
                         }
-                    }
-                    let inner = ArrayData::builder(DataType::UInt64)
-                        .len(inner_indices.len())
-                        .add_buffer(inner_indices.finish())
-                        .build()
-                        .unwrap();
-                    let inner_indices = PrimitiveArray::<UInt64Type>::from(inner);
+                        let inner = ArrayData::builder(DataType::UInt64)
+                            .len(inner_indices.len())
+                            .add_buffer(inner_indices.finish())
+                            .build()
+                            .unwrap();
+                        let inner_indices = PrimitiveArray::<UInt64Type>::from(inner);
 
-                    let outer = ArrayData::builder(DataType::UInt64)
-                        .len(outer_indices.len())
-                        .add_buffer(outer_indices.finish())
-                        .build()
+                        let outer = ArrayData::builder(DataType::UInt64)
+                            .len(outer_indices.len())
+                            .add_buffer(outer_indices.finish())
+                            .build()
+                            .unwrap();
+                        let outer_indices = PrimitiveArray::<UInt64Type>::from(outer);
+                        let next_batch = build_batch_from_indices(
+                            &self.schema,
+                            &outer_batch,
+                            &self.inner_data,
+                            outer_indices,
+                            inner_indices,
+                            &self.join_column_indices,
+                        )
                         .unwrap();
-                    let outer_indices = PrimitiveArray::<UInt64Type>::from(outer);
-                    let next_batch = build_batch_from_indices(
-                        &self.schema,
-                        &outer_batch,
-                        &self.inner_data,
-                        outer_indices,
-                        inner_indices,
-                        &self.join_column_indices,
-                    )?;
-                    Poll::Ready(Some(Ok(next_batch)))
+                        Some(Ok(next_batch))
+                    }
+                    Err(err) => Some(Err(err)),
                 }
-                None => Poll::Ready(None),
-            },
-            pending => pending,
+            }
+            None => None,
         }
     }
 }
@@ -260,14 +246,14 @@ impl HashJoinOp {
         Ok(())
     }
 
-    async fn _build<'a>(
+    fn _build<'a>(
         p_index: usize,
         inner_queue: Arc<dyn PartitionedQueue>,
         random_state: &'a RandomState,
         on_right: &'a Vec<Column>,
     ) -> SqlResult<(DataBlock, JoinedTable)> {
         let mut join_table = JoinedTable::new();
-        let inner_batch = inner_queue.dequeue_all(p_index).await?;
+        let inner_batch = inner_queue.dequeue_all(p_index)?;
 
         let mut hash_buffer = Vec::new();
         let offset = 0;
