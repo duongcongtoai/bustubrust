@@ -1,10 +1,8 @@
-use super::{exe::SchemaStream, DataBlock};
+use super::{exe::SchemaStream, util::GeneratorIteratorAdapter, DataBlock};
 use crate::sql::{
-    exe::{Operator, SendableDataBlockStream},
+    exe::{BoxedDataIter, Operator},
     ExecutionContext, SqlResult,
 };
-use async_stream::stream;
-use async_trait::async_trait;
 use datafusion::arrow::datatypes::SchemaRef;
 
 #[derive(Debug)]
@@ -19,22 +17,19 @@ impl InMemOp {
     }
 }
 
-#[async_trait]
 impl Operator for InMemOp {
-    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<BoxedDataIter> {
         let batches = self.batches.clone();
-        let stream = stream! {
-            for item in batches{
+        let stream = || {
+            for item in batches {
                 yield Ok(item);
             }
         };
-        let schemastream = SchemaStream::new(self.schema.clone(), Box::pin(stream));
+        let iter = GeneratorIteratorAdapter::new(stream);
+        let schemastream = SchemaStream::new(self.schema.clone(), Box::new(iter));
         Ok(schemastream)
     }
 
-    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        todo!()
-    }
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }

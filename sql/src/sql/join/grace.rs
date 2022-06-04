@@ -1,14 +1,12 @@
 use super::inmem::HashJoinOp;
 use crate::sql::{
-    exe::{
-        DataBlockStream, Executor, Operator, PlanType, SchemaStream, SendableDataBlockStream,
-        SendableResult,
-    },
+    exe::{BoxedDataIter, DataBlockStream, Executor, Operator, PlanType, SchemaStream},
     join::hash_util::hash_to_buckets,
+    util::GeneratorIteratorAdapter,
     DataBlock, ExecutionContext, SqlResult,
 };
+
 use ahash::RandomState;
-use async_stream::stream;
 use datafusion::{
     arrow::{
         array::{Array, PrimitiveArray},
@@ -20,8 +18,13 @@ use datafusion::{
         join_utils::{ColumnIndex, JoinSide},
     },
 };
-use futures::StreamExt;
-use std::{collections::HashMap, fmt::Debug, sync::Arc};
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    ops::{Generator, GeneratorState},
+    pin::Pin,
+    sync::Arc,
+};
 
 #[allow(dead_code)]
 pub struct GraceHashJoinPlan {
@@ -46,22 +49,13 @@ pub struct GraceHashJoinOp {
 unsafe impl Send for GraceHashJoinOp {}
 unsafe impl Sync for GraceHashJoinOp {}
 
-/* pub struct GraceHashJoiner {
-    ctx: ExecutionContext,
-    config: Config,
-    stack: Vec<PartitionLevel>,
-    join_column_indices: Vec<ColumnIndex>,
-    schema: SchemaRef,
-} */
-
-#[async_trait::async_trait]
 impl Operator for GraceHashJoinOp {
     fn schema(&self) -> SchemaRef {
         self.schema.clone()
     }
 
     /// Before return, it enqueue all data from left and right input to disk spillable queue
-    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<BoxedDataIter> {
         let outer_queue = ctx.new_queue(self.config.outer_schema.clone());
         let inner_queue = ctx.new_queue(self.config.inner_schema.clone());
 
@@ -74,96 +68,94 @@ impl Operator for GraceHashJoinOp {
             inner_queue,
             level: 0,
         };
-        let mut left_stream = self.left_op.execute(ctx.clone()).await?;
-        let mut right_stream = self.right_op.execute(ctx.clone()).await?;
+        let mut left_stream = self.left_op.execute_sync(ctx.clone())?;
+        let mut right_stream = self.right_op.execute_sync(ctx.clone())?;
         Self::partition_batch(
             &mut right_stream,
             &mut first_level_partitions,
             &self.config,
             true,
-        )
-        .await?;
+        )?;
 
         Self::partition_batch(
             &mut left_stream,
             &mut first_level_partitions,
             &self.config,
             false,
-        )
-        .await?;
+        )?;
 
         let mut stack: Vec<PartitionLevel> = vec![];
         stack.push(first_level_partitions);
         let moved_ctx = ctx.clone();
         let schema = self.schema.clone();
+        // let schema_cloned = self.schema.clone();
         let config = self.config.clone();
         let joined_column_indices = self.join_column_indices.clone();
 
-        Ok(SchemaStream::new(
-            schema.clone(),
-            Box::pin(stream! {
-                'recursiveloop: while stack.len() > 0 {
-                    let config = config.clone();
-                    while let Some((p_index, cur_level, outer_queue, inner_queue)) =
-                        Self::_find_next_inmem_sized_partition(&mut stack,config.max_size_per_partition)
-                    {
-                        let mut inmem_joiner = Self::_new_hash_joiner(
-                            &config,
-                            schema.clone(),
-                            joined_column_indices.clone(),
-                            p_index,
-                            cur_level,
-                            outer_queue,
-                            inner_queue,
-                        );
+        let gen = move || {
+            'recursiveloop: while stack.len() > 0 {
+                let config = config.clone();
+                while let Some((p_index, cur_level, outer_queue, inner_queue)) =
+                    Self::_find_next_inmem_sized_partition(
+                        &mut stack,
+                        config.max_size_per_partition,
+                    )
+                {
+                    let mut inmem_joiner = Self::_new_hash_joiner(
+                        &config,
+                        schema.clone(),
+                        joined_column_indices.clone(),
+                        p_index,
+                        cur_level,
+                        outer_queue,
+                        inner_queue,
+                    );
 
-                        // I used execute_sync because awaiting for a future inside this macro
-                        // requires the future to be sync, i don't know how to do that yet
-                        // let mut inmem_stream = inmem_joiner.execute_sync(moved_ctx.clone())?;
-                        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                        let moved_ctx2 = moved_ctx.clone();
-                        tokio::spawn(async move{
-                            let  inmem_stream = inmem_joiner.execute(moved_ctx2).await;
-                            match tx.send(inmem_stream).await{
-                                Err(some_err) => panic!(some_err),
-                                Ok(_) => {},
-                            }
-                        });
-                        let mut inmem_stream = rx.recv().await.expect("error receiving from channel").expect("inmem_joiner.execute");
-                        while let Some(batch_ret) = inmem_stream.next().await {
-                            yield batch_ret;
+                    // I used execute_sync because awaiting for a future inside this macro
+                    // requires the future to be sync, i don't know how to do that yet
+                    // let mut inmem_stream = inmem_joiner.execute_sync(moved_ctx.clone())?;
+                    /* let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                    let moved_ctx2 = moved_ctx.clone();
+                    tokio::spawn(async move{
+                        let  inmem_stream = inmem_joiner.execute(moved_ctx2).await;
+                        match tx.send(inmem_stream).await{
+                            Err(some_err) => panic!(some_err),
+                            Ok(_) => {},
                         }
-                    }
-                    while let Some((p_index, outer_queue, inner_queue)) =
-                        Self::_find_next_fallback_partition(&mut stack)
-                    {
-                        // p_index is a partition that even if partition one more time, it may not fit in
-                        // memory, so we use fallback strategy like merge join instead
-                        // make this fallback operation as late as possible
-                        panic!("unimplemented")
-                    }
+                    }); */
 
-                    let cur_partitions = stack.last_mut().unwrap();
-
-                    // recursive partition
-                    if cur_partitions.map.len() > 0 {
-                        // let st = cur_partitions.last_mut();
-                        if let Some(next_recursive_p) =
-                            Self::recursive_partition(moved_ctx.clone(), config, cur_partitions)
-                                .await?
-                        {
-                            stack.push(next_recursive_p);
-                            continue 'recursiveloop;
-                        }
+                    let mut inmem_stream = inmem_joiner.execute_sync(moved_ctx.clone()).unwrap();
+                    while let Some(batch_ret) = inmem_stream.next() {
+                        yield batch_ret;
                     }
-                    stack.pop();
                 }
-            }),
-        ))
-    }
+                while let Some((p_index, outer_queue, inner_queue)) =
+                    Self::_find_next_fallback_partition(&mut stack)
+                {
+                    // p_index is a partition that even if partition one more time, it may not fit in
+                    // memory, so we use fallback strategy like merge join instead
+                    // make this fallback operation as late as possible
+                    panic!("unimplemented")
+                }
 
-    fn execute_sync(&mut self, _: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        todo!()
+                let cur_partitions = stack.last_mut().unwrap();
+
+                // recursive partition
+                if cur_partitions.map.len() > 0 {
+                    // let st = cur_partitions.last_mut();
+                    if let Some(next_recursive_p) =
+                        Self::recursive_partition(moved_ctx.clone(), config, cur_partitions)
+                            .unwrap()
+                    {
+                        stack.push(next_recursive_p);
+                        continue 'recursiveloop;
+                    }
+                }
+                stack.pop();
+            }
+        };
+        let st2 = GeneratorIteratorAdapter::new(gen);
+        Ok(SchemaStream::new(self.schema.clone(), Box::new(st2)))
     }
 }
 
@@ -176,13 +168,12 @@ struct PartitionLevel {
     inner_queue: Arc<dyn PartitionedQueue>,
 }
 
-#[async_trait::async_trait]
 pub trait PartitionedQueue: Sync + Send + Debug {
-    fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SendableResult;
+    fn enqueue(&self, partition_idx: usize, data: DataBlock) -> SqlResult<()>;
 
-    async fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock>;
+    fn dequeue_all(&self, partition_idx: usize) -> SqlResult<DataBlock>;
 
-    fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<SendableDataBlockStream>;
+    fn dequeue(&self, partition_idx: usize, size: usize) -> SqlResult<BoxedDataIter>;
 
     fn id(&self) -> usize;
 }
@@ -264,8 +255,8 @@ impl GraceHashJoinOp {
         .expect("failted to create grace hash joiner");
     }
 
-    async fn partition_batch<'b>(
-        batch_stream: &'b mut SendableDataBlockStream,
+    fn partition_batch<'b>(
+        batch_stream: &'b mut BoxedDataIter,
         partition_infos: &mut PartitionLevel,
         c: &Config,
         is_inner: bool,
@@ -281,7 +272,7 @@ impl GraceHashJoinOp {
         };
 
         let mut reused_buffer = Vec::new();
-        while let Some(batch) = batch_stream.next().await {
+        while let Some(batch) = batch_stream.next() {
             let batch = batch?;
             reused_buffer.clear();
             reused_buffer.resize(batch.num_rows(), 0);
@@ -314,7 +305,7 @@ impl GraceHashJoinOp {
                 let output_batch = DataBlock::try_new(batch.schema(), columns)?;
 
                 let bucket_length = output_batch.num_rows();
-                queuer.enqueue(bucket_idx, output_batch).await?;
+                queuer.enqueue(bucket_idx, output_batch).unwrap();
 
                 if is_inner {
                     match partition_infos.map.get_mut(&bucket_idx) {
@@ -406,7 +397,7 @@ impl GraceHashJoinOp {
         return st;
     }
 
-    async fn recursive_partition(
+    fn recursive_partition(
         ctx: ExecutionContext,
         config: Config,
         current_partition: &mut PartitionLevel,
@@ -432,13 +423,13 @@ impl GraceHashJoinOp {
             let mut outer_stream = current_partition
                 .outer_queue
                 .dequeue(*parent_p_index, batch_size)?;
-            Self::partition_batch(&mut outer_stream, &mut new_level, &config, false).await?;
+            Self::partition_batch(&mut outer_stream, &mut new_level, &config, false)?;
 
             // stream of temporary ouput we have hashed in previous steps
             let mut inner_stream = current_partition
                 .inner_queue
                 .dequeue(*parent_p_index, batch_size)?;
-            Self::partition_batch(&mut inner_stream, &mut new_level, &config, true).await?;
+            Self::partition_batch(&mut inner_stream, &mut new_level, &config, true)?;
             let mut fallbacks = vec![];
             new_level.map.retain(|idx, item| {
                 let before_hash = parinfo.memsize as f64;
@@ -541,22 +532,15 @@ pub mod tests {
         Arc::new(InMemOp::new(schema, vec![batch]))
     }
 
-    async fn collect_batch_from_op(
-        mut op: Arc<dyn Operator>,
-        ctx: ExecutionContext,
-    ) -> Vec<DataBlock> {
+    fn collect_batch_from_op(mut op: Arc<dyn Operator>, ctx: ExecutionContext) -> Vec<DataBlock> {
         let outer_input_stream = Arc::get_mut(&mut op)
             .unwrap()
-            .execute(ctx.clone())
-            .await
+            .execute_sync(ctx.clone())
             .expect("failed to execute operator");
-        collect(outer_input_stream)
-            .await
-            .expect("failed to collect output")
+        collect(outer_input_stream).expect("failed to collect output")
     }
 
-    #[tokio::test]
-    async fn test_inmem_joiner() {
+    fn test_inmem_joiner() {
         let outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
         let inner = build_i32_table(vec![
             ("col_a", vec![1, 4, 3, 5]),
@@ -571,15 +555,15 @@ pub mod tests {
             super::build_join_schema(&outer.schema(), &inner.schema());
 
         let ctx = ExecutionContext::new_for_test();
-        let outer_batches = collect_batch_from_op(outer, ctx.clone()).await;
-        let inner_batches = collect_batch_from_op(inner, ctx.clone()).await;
+        let outer_batches = collect_batch_from_op(outer, ctx.clone());
+        let inner_batches = collect_batch_from_op(inner, ctx.clone());
 
         for item in outer_batches {
-            out_queue.enqueue(1, item);
+            out_queue.enqueue(1, item).unwrap();
         }
 
         for item in inner_batches {
-            in_queue.enqueue(1, item);
+            in_queue.enqueue(1, item).unwrap();
         }
 
         let random_state = RandomState::new();
@@ -595,12 +579,9 @@ pub mod tests {
             joined_column_indices,
         );
         let stream = joined_op
-            .execute(ctx.clone())
-            .await
+            .execute_sync(ctx.clone())
             .expect("executing join op");
-        let batches = collect(stream)
-            .await
-            .expect("failed to collect from joined stream");
+        let batches = collect(stream).expect("failed to collect from joined stream");
         let expected = vec![
             "+-------+-------+-------+-------+",
             "| col_a | col_b | col_a | col_c |",
@@ -612,8 +593,7 @@ pub mod tests {
         crate::assert_batches_sorted_eq!(expected, &batches);
     }
 
-    #[tokio::test]
-    async fn test_grace_hash_joiner() {
+    fn test_grace_hash_joiner() {
         let outer = build_i32_table_box(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
         let inner = build_i32_table_box(vec![
             ("col_a", vec![1, 4, 3, 5]),
@@ -642,10 +622,8 @@ pub mod tests {
             Arc::new(combined_schema),
         )
         .expect("failted to create grace hash joiner");
-        let stream = hj.execute(ctx.clone()).await.expect("executing join op");
-        let batches = collect(stream)
-            .await
-            .expect("failed to collect from joined stream");
+        let stream = hj.execute_sync(ctx.clone()).expect("executing join op");
+        let batches = collect(stream).expect("failed to collect from joined stream");
         let expected = vec![
             "+-------+-------+-------+-------+",
             "| col_a | col_b | col_a | col_c |",

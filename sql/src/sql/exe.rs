@@ -12,7 +12,6 @@ use crate::{
     },
     storage::sled::Sled,
 };
-use async_trait::async_trait;
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use futures::{stream::Stream, Future};
 use std::{env::temp_dir, fmt::Debug, pin::Pin, rc::Rc, sync::Arc};
@@ -34,7 +33,7 @@ impl ExecutionContext {
         let db = Sled::new(path).expect("failed creating sled");
 
         ExecutionContext {
-            txn: Txn {},
+            txn: Txn::new(),
             storage: Arc::new(db),
             queue: Arc::new(inmem),
         }
@@ -42,7 +41,7 @@ impl ExecutionContext {
     pub fn new(store: Arc<dyn Storage>) -> Self {
         let inmem = MemoryAllocator::new();
         ExecutionContext {
-            txn: Txn {},
+            txn: Txn::new(),
             storage: store,
             queue: Arc::new(inmem),
         }
@@ -61,16 +60,15 @@ impl ExecutionContext {
 }
 
 /// Trait for types that stream [arrow::record_batch::RecordBatch]
-pub trait DataBlockStream: Stream<Item = SqlResult<DataBlock>> {
+pub trait DataBlockStream: Iterator<Item = SqlResult<DataBlock>> {
     fn schema(self) -> SchemaRef;
 }
 
-/// Trait for types that stream [arrow::record_batch::RecordBatch]
-pub type SendableDataBlockStream = Pin<Box<dyn DataBlockStream + Send + Sync>>;
+pub type BoxedDataIter = Box<dyn DataBlockStream>;
 
-pub type SendableResult = Pin<Box<dyn Future<Output = SqlResult<()>> + Send + Sync>>;
+// pub type SendableResult = Pin<Box<dyn Future<Output = SqlResult<()>> + Send + Sync>>;
 pub struct SchemaStream {
-    inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>> + Send + Sync>>,
+    inner: Box<dyn Iterator<Item = SqlResult<DataBlock>>>,
     schema: SchemaRef,
 }
 
@@ -79,9 +77,9 @@ unsafe impl Sync for SchemaStream {}
 impl SchemaStream {
     pub fn new(
         schema: SchemaRef,
-        inner: Pin<Box<dyn Stream<Item = SqlResult<DataBlock>> + Send + Sync>>,
-    ) -> Pin<Box<Self>> {
-        Box::pin(SchemaStream { inner, schema })
+        inner: Box<dyn Iterator<Item = SqlResult<DataBlock>>>,
+    ) -> Box<Self> {
+        Box::new(SchemaStream { inner, schema })
     }
 }
 impl DataBlockStream for SchemaStream {
@@ -90,20 +88,15 @@ impl DataBlockStream for SchemaStream {
     }
 }
 
-impl Stream for SchemaStream {
+impl Iterator for SchemaStream {
     type Item = SqlResult<DataBlock>;
-    fn poll_next(
-        mut self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Self::Item>> {
-        self.inner.as_mut().poll_next(cx)
+    fn next(&mut self) -> Option<Self::Item> {
+        self.inner.next()
     }
 }
 
-#[async_trait]
 pub trait Operator: Debug + Send + Sync {
-    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
-    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream>;
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<BoxedDataIter>;
 
     fn schema(&self) -> SchemaRef;
 }
@@ -124,24 +117,9 @@ pub enum PlanType {
 pub struct Executor {}
 impl Executor {
     // TODO: maybe return some async iter like stream in the future
-    pub async fn execute(
-        plan: PlanType,
-        ctx: ExecutionContext,
-    ) -> SqlResult<SendableDataBlockStream> {
+    pub fn execute(plan: PlanType, ctx: ExecutionContext) -> SqlResult<BoxedDataIter> {
         let mut operator: Box<dyn Operator> = Self::create_operator(plan, ctx.clone());
-        operator.execute(ctx).await
-
-        /* let mut ret = vec![];
-        while let Some(value) = retstream.next().await {
-            let some_block: DataBlock = value?;
-            ret.extend(some_block.columns);
-
-            println!("{}", value);
-        }
-
-        // TODO: not sure if this calls next() for non_result operator
-
-        Ok(DataBlock::new(retstream.schema(), ret)) */
+        operator.execute_sync(ctx)
     }
 
     pub fn create_operator(plan_type: PlanType, ctx: ExecutionContext) -> Box<dyn Operator> {
@@ -183,24 +161,18 @@ pub trait Catalog {
 
 pub type RID = u64;
 
-#[async_trait]
 pub trait Storage: Catalog + Sync + Send {
     // TODO: batch insert
-    async fn insert_tuples(
+    fn insert_tuples(
         &self,
         table: &str,
-        data: SendableDataBlockStream,
+        data: BoxedDataIter,
         txn: &Txn,
-    ) -> SqlResult<SendableDataBlockStream>;
-    async fn delete(&self, table: &str, data: SendableDataBlockStream, txn: &Txn) -> SqlResult<()>;
-    async fn get_tuples(
-        &self,
-        table: &str,
-        rids: SendableDataBlockStream,
-        txn: &Txn,
-    ) -> SqlResult<SendableDataBlockStream>;
+    ) -> SqlResult<BoxedDataIter>;
+    fn delete(&self, table: &str, data: BoxedDataIter, txn: &Txn) -> SqlResult<()>;
+    fn get_tuples(&self, table: &str, rids: BoxedDataIter, txn: &Txn) -> SqlResult<BoxedDataIter>;
 
-    async fn scan(&self, table: &str, txn: &Txn) -> SqlResult<SendableDataBlockStream>;
+    fn scan(&self, table: &str, txn: &Txn) -> SqlResult<BoxedDataIter>;
 }
 
 #[cfg(test)]

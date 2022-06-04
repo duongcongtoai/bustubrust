@@ -1,5 +1,5 @@
 use crate::sql::{
-    exe::{Catalog, SendableDataBlockStream, Storage},
+    exe::{BoxedDataIter, Catalog, Storage},
     tx::Txn,
     util, Error, SqlResult,
 };
@@ -41,27 +41,21 @@ impl From<&Tuple> for IVec {
 }
  */
 
-#[async_trait::async_trait]
 impl Storage for Sled {
-    async fn get_tuples(
-        &self,
-        table: &str,
-        rids: SendableDataBlockStream,
-        txn: &Txn,
-    ) -> SqlResult<SendableDataBlockStream> {
+    fn get_tuples(&self, table: &str, rids: BoxedDataIter, txn: &Txn) -> SqlResult<BoxedDataIter> {
         todo!()
     }
 
-    async fn scan(&self, table: &str, txn: &Txn) -> SqlResult<SendableDataBlockStream> {
+    fn scan(&self, table: &str, txn: &Txn) -> SqlResult<BoxedDataIter> {
         todo!()
     }
 
-    async fn insert_tuples(
+    fn insert_tuples(
         &self,
         table: &str,
-        data: SendableDataBlockStream,
+        data: BoxedDataIter,
         txn: &Txn,
-    ) -> SqlResult<SendableDataBlockStream> {
+    ) -> SqlResult<BoxedDataIter> {
         todo!()
         /* let datablocks = util::collect(data).await?;
         let res = tokio::task::spawn_blocking(move || {
@@ -103,7 +97,7 @@ impl Storage for Sled {
         Ok(rid as RID) */
     }
 
-    async fn delete(&self, table: &str, data: SendableDataBlockStream, txn: &Txn) -> SqlResult<()> {
+    fn delete(&self, table: &str, data: BoxedDataIter, txn: &Txn) -> SqlResult<()> {
         todo!()
     }
 }

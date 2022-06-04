@@ -11,7 +11,7 @@ pub mod insert;
 pub mod join;
 pub mod scan;
 // pub mod schema;
-pub mod cc;
+// pub mod cc;
 pub mod common;
 pub mod table_gen;
 pub mod tx;

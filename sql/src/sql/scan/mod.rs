@@ -2,7 +2,7 @@ use crate::sql::{exe::Operator, ExecutionContext, SqlResult};
 use datafusion::arrow::datatypes::{Schema, SchemaRef};
 use std::sync::Arc;
 
-use super::exe::SendableDataBlockStream;
+use super::exe::BoxedDataIter;
 
 pub struct SeqScanPlan {
     pub table: String,
@@ -37,11 +37,11 @@ impl SeqScanner {
 
 #[async_trait::async_trait]
 impl Operator for SeqScanner {
-    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
+    /* fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<BoxedDataIter> {
         todo!()
-    }
-    async fn execute(&mut self, ctx: ExecutionContext) -> SqlResult<SendableDataBlockStream> {
-        ctx.get_storage().scan(&self.table, ctx.get_txn()).await
+    } */
+    fn execute_sync(&mut self, ctx: ExecutionContext) -> SqlResult<BoxedDataIter> {
+        ctx.get_storage().scan(&self.table, ctx.get_txn())
     }
 
     fn schema(&self) -> SchemaRef {
