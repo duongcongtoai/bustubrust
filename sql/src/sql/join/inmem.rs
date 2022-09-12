@@ -1,5 +1,5 @@
 use crate::sql::{
-    exe::{BoxedDataIter, DataBlockStream, ExecutionContext, Operator, PlanType, SchemaStream},
+    exe::{BoxedDataIter, DataIter, ExecutionContext, Operator, PlanType, SchemaDataIter},
     join::{
         grace::PartitionedQueue,
         hash_util::{create_hashes, hash_to_buckets},
@@ -103,7 +103,7 @@ pub struct HashJoiner {
 unsafe impl Sync for HashJoiner {}
 unsafe impl Send for HashJoiner {}
 
-impl DataBlockStream for HashJoiner {
+impl DataIter for HashJoiner {
     fn schema(self) -> SchemaRef {
         self.schema.clone()
     }
