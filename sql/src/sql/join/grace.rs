@@ -1,6 +1,6 @@
 use super::inmem::HashJoinOp;
 use crate::sql::{
-    exe::{BoxedDataIter, DataBlockStream, Executor, Operator, PlanType, SchemaStream},
+    exe::{BoxedDataIter, DataIter, Executor, Operator, PlanType, SchemaDataIter},
     join::hash_util::hash_to_buckets,
     util::GeneratorIteratorAdapter,
     DataBlock, ExecutionContext, SqlResult,
@@ -18,13 +18,7 @@ use datafusion::{
         join_utils::{ColumnIndex, JoinSide},
     },
 };
-use std::{
-    collections::HashMap,
-    fmt::Debug,
-    ops::{Generator, GeneratorState},
-    pin::Pin,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 #[allow(dead_code)]
 pub struct GraceHashJoinPlan {
@@ -155,7 +149,7 @@ impl Operator for GraceHashJoinOp {
             }
         };
         let st2 = GeneratorIteratorAdapter::new(gen);
-        Ok(SchemaStream::new(self.schema.clone(), Box::new(st2)))
+        Ok(SchemaDataIter::new(self.schema.clone(), Box::new(st2)))
     }
 }
 
@@ -540,6 +534,7 @@ pub mod tests {
         collect(outer_input_stream).expect("failed to collect output")
     }
 
+    #[test]
     fn test_inmem_joiner() {
         let outer = build_i32_table(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
         let inner = build_i32_table(vec![
@@ -593,6 +588,7 @@ pub mod tests {
         crate::assert_batches_sorted_eq!(expected, &batches);
     }
 
+    #[test]
     fn test_grace_hash_joiner() {
         let outer = build_i32_table_box(vec![("col_a", vec![1, 2, 3]), ("col_b", vec![2, 3, 4])]);
         let inner = build_i32_table_box(vec![

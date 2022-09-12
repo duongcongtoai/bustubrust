@@ -1,4 +1,4 @@
-use super::{exe::SchemaStream, util::GeneratorIteratorAdapter, DataBlock};
+use super::{exe::SchemaDataIter, util::GeneratorIteratorAdapter, DataBlock};
 use crate::sql::{
     exe::{BoxedDataIter, Operator},
     ExecutionContext, SqlResult,
@@ -9,7 +9,6 @@ use datafusion::arrow::datatypes::SchemaRef;
 pub struct InMemOp {
     schema: SchemaRef,
     batches: Vec<DataBlock>,
-    // cur_batch: usize,
 }
 impl InMemOp {
     pub fn new(schema: SchemaRef, batches: Vec<DataBlock>) -> Self {
@@ -26,7 +25,7 @@ impl Operator for InMemOp {
             }
         };
         let iter = GeneratorIteratorAdapter::new(stream);
-        let schemastream = SchemaStream::new(self.schema.clone(), Box::new(iter));
+        let schemastream = SchemaDataIter::new(self.schema.clone(), Box::new(iter));
         Ok(schemastream)
     }
 

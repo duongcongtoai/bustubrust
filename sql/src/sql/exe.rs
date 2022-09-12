@@ -12,10 +12,9 @@ use crate::{
     },
     storage::sled::Sled,
 };
-use datafusion::arrow::datatypes::{Schema, SchemaRef};
-use futures::{stream::Stream, Future};
-use std::{env::temp_dir, fmt::Debug, pin::Pin, rc::Rc, sync::Arc};
-use tempfile::{tempfile, NamedTempFile};
+use datafusion::arrow::datatypes::SchemaRef;
+use std::{fmt::Debug, sync::Arc};
+use tempfile::NamedTempFile;
 
 #[derive(Clone)]
 pub struct ExecutionContext {
@@ -60,35 +59,35 @@ impl ExecutionContext {
 }
 
 /// Trait for types that stream [arrow::record_batch::RecordBatch]
-pub trait DataBlockStream: Iterator<Item = SqlResult<DataBlock>> {
+pub trait DataIter: Iterator<Item = SqlResult<DataBlock>> {
     fn schema(self) -> SchemaRef;
 }
 
-pub type BoxedDataIter = Box<dyn DataBlockStream>;
+pub type BoxedDataIter = Box<dyn DataIter>;
 
 // pub type SendableResult = Pin<Box<dyn Future<Output = SqlResult<()>> + Send + Sync>>;
-pub struct SchemaStream {
+pub struct SchemaDataIter {
     inner: Box<dyn Iterator<Item = SqlResult<DataBlock>>>,
     schema: SchemaRef,
 }
 
-unsafe impl Send for SchemaStream {}
-unsafe impl Sync for SchemaStream {}
-impl SchemaStream {
+unsafe impl Send for SchemaDataIter {}
+unsafe impl Sync for SchemaDataIter {}
+impl SchemaDataIter {
     pub fn new(
         schema: SchemaRef,
         inner: Box<dyn Iterator<Item = SqlResult<DataBlock>>>,
     ) -> Box<Self> {
-        Box::new(SchemaStream { inner, schema })
+        Box::new(SchemaDataIter { inner, schema })
     }
 }
-impl DataBlockStream for SchemaStream {
+impl DataIter for SchemaDataIter {
     fn schema(self) -> SchemaRef {
         self.schema.clone()
     }
 }
 
-impl Iterator for SchemaStream {
+impl Iterator for SchemaDataIter {
     type Item = SqlResult<DataBlock>;
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next()

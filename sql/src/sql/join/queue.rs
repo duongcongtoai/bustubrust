@@ -1,5 +1,5 @@
 use crate::sql::{
-    exe::{BoxedDataIter, SchemaStream},
+    exe::{BoxedDataIter, SchemaDataIter},
     join::grace::PartitionedQueue,
     DataBlock, SqlResult,
 };
@@ -9,7 +9,6 @@ use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
     sync::Arc,
-    task::{Context, Poll},
 };
 
 #[derive(Debug)]
@@ -128,7 +127,7 @@ impl PartitionedQueue for Inmem {
             None => Err(format!("partition {} does not exist", partition_idx))?,
             Some(exist) => {
                 let fut = DequeueFut { all: exist };
-                Ok(SchemaStream::new(self.schema.clone(), Box::new(fut)))
+                Ok(SchemaDataIter::new(self.schema.clone(), Box::new(fut)))
             }
         }
     }
