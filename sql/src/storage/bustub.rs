@@ -1,19 +1,16 @@
-use crate::bpm::BufferPoolManager;
-use crate::bpm::Frame;
-use crate::bpm::PAGE_SIZE;
-use crate::sql;
-use crate::sql::exe::Catalog;
-use crate::sql::exe::Schema;
-use crate::sql::exe::TableMeta;
-use crate::sql::exe::Tuple;
-use crate::sql::exe::RID;
-use crate::sql::tx::Txn;
-use crate::sql::SqlResult;
+use crate::{
+    bpm::{BufferPoolManager, Frame, PAGE_SIZE},
+    sql,
+    sql::{
+        exe::{Catalog, Schema, TableMeta, Tuple, RID},
+        tx::Txn,
+        SqlResult,
+    },
+};
 use core::cell::RefCell;
 use parking_lot::Mutex;
 use serde_derive::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 // Abandoned, use Sled for now
 pub struct Bustub {
@@ -150,14 +147,12 @@ impl Catalog for RefCell<Bustub> {
 }
 #[cfg(test)]
 pub mod tests {
-    use crate::bpm::DiskManager;
-    use crate::replacer::LRURepl;
-    use crate::sql::exe::Catalog;
-    use crate::sql::exe::Column;
-    use crate::storage::bustub::BufferPoolManager;
-    use crate::storage::bustub::Bustub;
-    use crate::storage::bustub::Schema;
-    use crate::storage::bustub::PAGE_SIZE;
+    use crate::{
+        bpm::DiskManager,
+        replacer::LRURepl,
+        sql::exe::{Catalog, Column},
+        storage::bustub::{BufferPoolManager, Bustub, Schema, PAGE_SIZE},
+    };
     use core::cell::RefCell;
     use tempfile::tempfile;
 
