@@ -1,3 +1,4 @@
+mod types;
 // TODO
 // Keyvalue store
 
