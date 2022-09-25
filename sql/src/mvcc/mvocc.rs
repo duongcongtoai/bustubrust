@@ -54,7 +54,7 @@ pub enum TxPhase {
     Aborted,
 }
 
-pub struct OCCTx {
+pub struct OccTx {
     read_set: Vec<Tuple>,
     // info needed to repeat scan, maybe if i scan this again, those things must be visible again,
     // you some weird committed items
@@ -64,21 +64,97 @@ pub struct OCCTx {
     // inserted version
     write_set: Vec<Tuple>,
 }
-pub trait Predicate {}
-
-pub struct IndexScanOp<P: Predicate> {
-    read_time: u64,
-    index: Vec<()>,
-    predicate: P,
+pub struct Predicate {
+    search: SearchPred,
+    residual: ResidualPred,
 }
 
-// TODO: make this generic
+pub enum SearchPred {
+    Equality(EqualityPred),
+    Range(RangePred),
+}
+pub struct EqualityPred {
+    field: String,
+}
+pub struct RangePred {
+    // TODO inclusive or exclusive
+    from: String,
+    to: String,
+}
+pub struct ResidualPred {}
+
+pub struct IndexScanOp {
+    read_time: u64,
+    index: Vec<()>,
+    predicate: Predicate,
+}
+
+/// TODO: make this generic
+/// How to handle commit dependencies announcement?
 impl MVOCC {
     fn txn_commit(tx: &mut Tx) {}
 
     fn txn_abort(tx: &mut Tx) {}
 
+    /// with serializable isolation level
+    /// read_time = tx.begin_ts
+    /// 1. start scan: register to t's scanset => t can check for phantom during validation
+    /// must store info to check if the scan is repeatable: index, predicates
+    ///
+    /// 2. check predicate: if version does not satisfy P, it is ignored. If the scan is range
+    ///    scan and index key exceeds the upper bound of the range => terminated
+    ///
+    /// 3. check visibility, it may results into some commit dependencies with other tx, => it
+    ///    must register its dependencies to those tx. IF the visibility test fails => continue
+    ///    with next version
+    /// 4. if T intends just read V, it add V to its readset
+    /// 5. If T intends to update or delete V, must check if version is updatable (check the
+    ///    update section's note). note that it can still has speculative update (it writes to
+    ///    some result of a uncomitted tx, but this tx must have finished its processing phase)
+    /// 6. cas v's end's field with its tx_id, if fails => abort. Else this serves as an
+    ///    exclusive write lock, it records 2 pointer to its write set: old/new version. Those
+    ///    are used for multiple purpose (logging new version during commit), post processing
+    ///    after commit/abort, locate old version for later gc
+    ///    New version is not visible until t finish processing phase, => feel free to add new
+    ///    version
+    /// 7. a delete = update without creating new version. => case like update case, pointer is
+    ///    added to T write set and complete
+    ///
+    /// 8. precommit: acquire end_ts for T and set state to Preparing
     fn txn_processing_phase_index_scan(tx: &mut Tx) {}
+
+    /// read validation, wait for commit depenencies, logging
+    fn txn_preparing_phase_index_scan(tx: &mut Tx) {
+        // validate
+        // wait for commit dependencies
+        // logging
+    }
+
+    /// This steps may add more commit dependencies to T
+    /// 1. check read visibility: for each of its readset, check visibility(version,tx.end_ts)
+    /// 2. check phantom: for each scanset, repeat scan looking for versions came into existence
+    ///    during T lifetime and are visible at the end of tx (read_ts is now t.end_ts)
+    /// Check the figure in the paper for more details
+    /// 1. V is visible before and after T => pass read, pass phantom
+    /// 2. V is visible before but not visible for T's end_ts => fail read, pass phantom
+    /// 3. V is not visible before T, but later added but is made invisible again before T's end =>
+    ///    pass => read NA, phantom pass
+    /// 4. V is not visible before T but later visible for T's end_ts => read NA, but phantom fail
+    /// If either read/phatom validation fails, it must abort
+    fn txn_preparing_phase_index_scan_validate(tx: &mut Tx) {}
+
+    /// scan writeset, write new versions created to persistent log, commit order based on tx's
+    /// end_ts, wait for the commit is flushed to disk, then set phase=postprocessing
+    fn txn_preparing_phase_index_scan_logging(tx: &mut Tx) {}
+
+    /// Commit: Propagate its end_ts to old version's end_ts and new version's begin_ts
+    /// Abort: begin of new version set to inf, end_field of old version to inf. However, if it
+    /// dectects that end_field of old version has changed to something else, leave it
+    ///
+    /// Broadcast commit depdencies
+    ///
+    /// Remove this Tx from Tx table, but pointers to old version may be needed for gc
+    fn txn_postprocessing_phase(tx: &mut Tx) {}
 
     /// Preparation phase. During this phase the transaction determines whether it can commit or is forced to abort. If it has to
     /// abort, it switches its state to Aborted and continues to the next
@@ -86,7 +162,14 @@ impl MVOCC {
     /// information about deleted versions to a redo log record and
     /// waits for the log record to reach non-volatile storage. The
     /// transaction then switches its state to Committed.
-    fn txn_prepare_phase(tx: &mut Tx) {}
+    fn txn_prepare_phase(tx: &mut Tx) {
+        // Backward validation instead of forward validation:
+        // Check if committing transaction conflicts with any previously committed tx
+        //
+        // Previous approach: validate readset with writeset of other tx(things it has been read
+        // has not been written by other tx)
+        // => optimization: things it has been read is still visible as of the end of the tx
+    }
     // on error must switch state to abort
     fn txn_processing_phase_update(
         &self,
@@ -168,7 +251,7 @@ pub fn find_visible_version(
     // 1. if tx_id == my_ts => visible
     // 2. txn_id = other tx_e's id and tx_e's is preparing
     // 2.a. tx_e's end_ts > read_ts => visible
-    // 2.b. tx_e's end_ts < read_ts => speculatively ignore
+    // 2.b. tx_e's end_ts < read_ts => speculatively ignore, and is commit dependent of tx_e
     // 3. tx_e is committed: use tx_e's end_ts and v's end_ts to check visibility
     // 4. ts_e is aborted => visible
     // 5. ts_e is terminated or not found => re_read end_ts again .
