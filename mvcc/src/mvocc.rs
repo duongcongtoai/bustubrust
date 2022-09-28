@@ -178,16 +178,26 @@ impl MVOCC {
         payload: Vec<u8>,
     ) -> Result<(), String> {
         let versions = self.index.get_mut(&key).unwrap();
-        match find_visible_version(tx, &versions) {
+
+        // Based on isolation level, this ts may differ, but let's make it default serializable and
+        // use tx.begin_ts
+        let read_ts = tx.begin_ts;
+
+        match find_visible_version(tx, read_ts as u64, &versions) {
             None => return Err("not found visible version".to_string()),
-            Some((version, last_read_ts)) => unsafe {
-                let ret = update(tx, last_read_ts, version, payload);
-                match ret {
-                    // Safety: we have aleady acquired write lock on the
-                    Some(new_version) => {}
-                    None => return Err("serialization err".to_string()),
-                };
-            },
+            Some(visibility_ret) => {
+                match visibility_ret {
+                    Err(some_err) => return Err(some_err),
+                    Ok((version, last_read_ts)) => unsafe {
+                        let update_ret = update(tx, last_read_ts, version, payload);
+                        match update_ret {
+                            // Safety: we have aleady acquired write lock on the
+                            Some(new_version) => {}
+                            None => return Err("serialization err".to_string()),
+                        };
+                    },
+                }
+            }
         }
 
         Ok(())
@@ -230,7 +240,9 @@ pub fn find_visible_version(
     tx: &Tx,
     read_ts: u64,
     versions: &VersionChain,
-) -> Option<(Tuple, u64)> {
+) -> Option<Result<(Tuple, u64), String>> {
+    for v in versions {}
+
     unimplemented!()
     // begin_ts == tx_id:
     // 1. if tx_id == my_ts && end_ts == inf => visible

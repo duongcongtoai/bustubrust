@@ -6,6 +6,17 @@
 - Phantom avoidance: Tx's scan should also not return new version
   (inserted/deleted)
 
+### The implementation of the MCCC must satisfy skew write anomoly:
+UPDATE Duties SET Status = ’reserve’
+WHERE DoctorId = :D
+AND Shift = :S
+AND Status = ’on duty’
+SELECT COUNT(DISTINCT DoctorId) INTO tmp
+FROM Duties
+WHERE Shift = :S
+AND Status = ’on duty’
+IF (tmp = 0) THEN ROLLBACK ELSE COMMIT
+
 
 ### Read
 only version's valid time overlaps with the. Different versions of a

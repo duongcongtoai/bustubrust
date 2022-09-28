@@ -2,14 +2,13 @@ use core::cell::RefCell;
 use libc::O_DIRECT;
 use owning_ref::OwningHandle;
 use parking_lot::{Mutex, MutexGuard};
-use std::borrow::Borrow;
-use std::collections::HashMap;
-use std::collections::VecDeque;
-use std::os::unix::fs::OpenOptionsExt;
-use std::sync::Arc;
 use std::{
+    borrow::Borrow,
+    collections::{HashMap, VecDeque},
     fs::{File, OpenOptions},
     io::{copy, Error, Read, Seek, SeekFrom, Write},
+    os::unix::fs::OpenOptionsExt,
+    sync::Arc,
 };
 pub struct BufferPoolManager {
     bp: Mutex<BufferPool>,
