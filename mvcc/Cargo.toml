@@ -10,4 +10,7 @@ name= "mvcc"
 path = "src/lib.rs"
 
 [dependencies]
+crossbeam-channel = "0.5.6"
+crossbeam-utils = "0.8.11"
+dashmap = "5.4.0"
 parking_lot = "0.12.1"
