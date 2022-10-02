@@ -1,37 +1,21 @@
-use crossbeam_channel::{unbounded, Receiver, Sender};
-use crossbeam_utils::sync::WaitGroup;
+use crossbeam_channel::{Receiver, Sender};
 use dashmap::DashMap;
-use parking_lot::RwLock;
-use std::sync::{
-    atomic::{AtomicI32, AtomicU32, Ordering},
-    Arc,
-};
-
-pub struct Waiter {
-    msg_notifier: Sender<DepCode>,
-    msg_receiver: Receiver<DepCode>,
-    total_dependencies: AtomicU32,
-}
-
-pub struct Unlocker {
-    // on commit, remove sender from the table
-    // so no tx can further send its id to this channel and wait forever
-    dep_notifier: Sender<TxID>,
-
-    // find all waiters channel and notify them, whether to abort or to continue
-    waiters: Receiver<TxID>,
-}
+use log::debug;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub struct Tx {
-    total_dependencies: AtomicU32,
+    id: TxID,
+    total_dependencies: u64,
+    dep_result_receiver: Receiver<(TxID, DepCode)>,
+    dep_receiver: Receiver<TxID>,
 }
 pub type TxID = u64;
 
 pub struct TxManager {
     // inner: DashMap<TxID, Arc<Tx>>,
     // hold address of tx
-    commit_dep_senders: DashMap<TxID, RwLock<Sender<TxID>>>,
-    commit_dep_resolvers: DashMap<TxID, RwLock<Receiver<DepCode>>>,
+    commit_dep_senders: DashMap<TxID, Sender<TxID>>,
+    commit_dep_result_sender: DashMap<TxID, Sender<(TxID, DepCode)>>,
 }
 
 #[derive(Debug)]
@@ -40,19 +24,34 @@ pub enum DepCode {
     Success,
 }
 
-fn dosomething() {
-    let a = WaitGroup::new();
-    let (a, b) = unbounded();
-    // a depends on b,c,d
-    // b,c success, d fails
-    // a block on that and return abort
-}
-
 impl TxManager {
-    // list of commitsender
-    // list of receiver
-    //
-    fn commit_tx() {
+    // this tx_id is dependent on some other tx, and would like those tx to notify it using this
+    // sender channel
+    // also, other tx may also are dependent on this tx_id, for them to register their
+    // dependencies, this tx_id also need to expose a sender channel
+    fn register_channel(
+        &self,
+        tx_id: TxID,
+        dep_sender: Sender<TxID>,
+        depee_sender: Sender<(TxID, DepCode)>,
+    ) {
+        self.commit_dep_senders.insert(tx_id, dep_sender);
+        self.commit_dep_result_sender.insert(tx_id, depee_sender);
+    }
+
+    fn add_dep(&self, tx_id: TxID, dep_id: TxID) -> bool {
+        let sender = self.commit_dep_senders.get(&dep_id).unwrap();
+        let mut success = false;
+        match sender.send(tx_id) {
+            Ok(_) => {}
+            Err(msg) => {
+                success = false;
+                debug!("tx_id {} failed to register its dependencies with tx_id {} because of receiver may have been droped",
+                    tx_id,dep_id);
+            }
+        }
+        return success;
+
         // get its channel for map
         // drop the sender from the map
         //
@@ -63,7 +62,7 @@ impl TxManager {
         // to the channel return error, if the receiver obj has been dropped
     }
 
-    fn wait_for_dependencies() {
+    fn wait_for_dependencies(&self, tx: Tx) {
         // each tx before this step has successfully registered itself to its dependencies
         //
         // SAFETY: we guarantee that they will eventually send a signal back to us, or deadlock
@@ -80,38 +79,43 @@ impl TxManager {
         //
         // can use receiver.iter().collect() to block until the senders are dropped
         // but we can cancel early
-    }
+        //
+        let do_commit = tx._wait_for_dep_dependencies();
 
-    fn new_waiter() -> Waiter {
-        let (msg_notifier, msg_receiver) = unbounded();
-        return Waiter {
-            msg_notifier,
-            msg_receiver,
-            my_wg: Vec::new(),
-        };
+        // Safety: early abort will results in situation that
+        // other dep_tx wants to notify this tx about its result, they won't be
+        // able to bc we have removed this items, need to check crossbeam channel behaviour what
+        // happnes if such event occured
+        self.commit_dep_result_sender.remove(&tx.id).unwrap();
     }
-    fn add_dependencies(&mut self, w: Arc<Unlocker>) {
-        let wg = WaitGroup::new();
-        w.dep_notifier.send(wg.clone());
-        self.my_wg.push(wg);
-    }
+}
+impl Tx {
+    fn _wait_for_dep_dependencies(&self) -> bool {
+        let msg_receiver = &self.dep_result_receiver;
+        let total = self.total_dependencies;
 
-    fn wait(&self, tx_id: TxID, tx: Tx) {
-        let msg_receiver = *self.commit_dep_resolvers.get(&tx_id).unwrap().read();
-        let total = tx.total_dependencies.load(Ordering::SeqCst);
+        let mut abort = false;
         for i in 0..total {
-            let code = msg_receiver.recv().unwrap();
+            let (dep_id, code) = msg_receiver.recv().unwrap();
             match code {
                 DepCode::Abort => {
+                    abort = true;
+                    debug!(
+                        "Tx {} early abort because of dependency on {} aborted",
+                        self.id, dep_id,
+                    );
                     break;
                 }
                 DepCode::Success => {}
             }
         }
-        // Safety: early abort will results in situation that
-        // other tx wants to notify this tx about its result, they won't be
-        // able to bc we have removed this items, they may be blocked a bit because
-        // we are
-        msg_receiver.commit_dep_resolvers.remove(&tx_id);
+        if !abort {
+            debug!(
+                "Tx {} commit after waiting for {} of its dependencies",
+                self.id, total
+            );
+        }
+
+        return !abort;
     }
 }
