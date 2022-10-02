@@ -6,8 +6,10 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub struct Tx {
     id: TxID,
     total_dependencies: u64,
+    // where i get my dependencies' result
     dep_result_receiver: Receiver<(TxID, DepCode)>,
-    dep_receiver: Receiver<TxID>,
+    // where i get my dependent
+    dep_registrations: Receiver<TxID>,
 }
 pub type TxID = u64;
 
@@ -18,7 +20,7 @@ pub struct TxManager {
     commit_dep_result_sender: DashMap<TxID, Sender<(TxID, DepCode)>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Copy, Clone)]
 pub enum DepCode {
     Abort,
     Success,
@@ -46,7 +48,7 @@ impl TxManager {
             Ok(_) => {}
             Err(msg) => {
                 success = false;
-                debug!("tx_id {} failed to register its dependencies with tx_id {} because of receiver may have been droped",
+                debug!("tx_id {} failed to register its dependencies with tx_id {} because the receiver may have been droped",
                     tx_id,dep_id);
             }
         }
@@ -82,11 +84,56 @@ impl TxManager {
         //
         let do_commit = tx._wait_for_dep_dependencies();
 
-        // Safety: early abort will results in situation that
+        // SAFETY: early abort will results in situation that
         // other dep_tx wants to notify this tx about its result, they won't be
         // able to bc we have removed this items, need to check crossbeam channel behaviour what
-        // happnes if such event occured
+        // happens if such event occured
+        // ------------------------------------------------------
+        // other tx does not need to notify me about their result anymore, in case i abort
+        // they can ignore error and continue
         self.commit_dep_result_sender.remove(&tx.id).unwrap();
+        let mut announce_code = DepCode::Abort;
+        if do_commit {
+            announce_code = DepCode::Success;
+        }
+
+        // no other tx can register me as their dependencies
+        // if they somehow acquire me after this code runs, they still hold a reference to one copy
+        // of sender obj, then my next code will block until that copied sender is dropped :D
+        self.commit_dep_senders.remove(&tx.id).unwrap();
+        // get all the dependencies and notify them about my result
+        loop {
+            let new_dep = tx.dep_registrations.recv();
+            match new_dep {
+                Ok(tx_id) => {
+                    match self.commit_dep_result_sender.get(&tx_id) {
+                        // try telling this tx about its result
+                        Some(sender) => match sender.send((tx.id, announce_code)) {
+                            Ok(()) => {}
+                            // this op may fail, because between the period this thread acquire the
+                            // sender obj and actually sending it, the thread holding the receiver
+                            // may have dropped the receiver obj, log it out first
+                            Err(some_err) => {
+                                debug!(
+                                    "tx_id {} failed to notify ts dependent tx_id {}",
+                                    tx.id, tx_id
+                                );
+                            }
+                        },
+                        None => {
+                            // this tx has removed its own channel due to early abort, we don't need to announce
+                        }
+                    }
+                }
+                Err(_) => {
+                    // SAFETY: we need this, we expect this loop to end once all the senders have
+                    // dropped referencing, that's the only guarantee to have no leftover message
+                    break;
+                }
+            }
+        }
+
+        // must announce its dependencies about its result
     }
 }
 impl Tx {
