@@ -27,6 +27,12 @@ pub enum DepCode {
 }
 
 impl TxManager {
+    fn new() -> Self {
+        TxManager {
+            commit_dep_senders: DashMap::new(),
+            commit_dep_result_sender: DashMap::new(),
+        }
+    }
     // this tx_id is dependent on some other tx, and would like those tx to notify it using this
     // sender channel
     // also, other tx may also are dependent on this tx_id, for them to register their
@@ -35,10 +41,11 @@ impl TxManager {
         &self,
         tx_id: TxID,
         dep_sender: Sender<TxID>,
-        depee_sender: Sender<(TxID, DepCode)>,
+        dep_result_sender: Sender<(TxID, DepCode)>,
     ) {
         self.commit_dep_senders.insert(tx_id, dep_sender);
-        self.commit_dep_result_sender.insert(tx_id, depee_sender);
+        self.commit_dep_result_sender
+            .insert(tx_id, dep_result_sender);
     }
 
     fn add_dep(&self, tx_id: TxID, dep_id: TxID) -> bool {
@@ -137,6 +144,18 @@ impl TxManager {
     }
 }
 impl Tx {
+    fn new(
+        id: TxID,
+        dep_result_receiver: Receiver<(u64, DepCode)>,
+        dep_registrations: Receiver<TxID>,
+    ) -> Self {
+        Tx {
+            id,
+            dep_result_receiver,
+            dep_registrations,
+            total_dependencies: 0,
+        }
+    }
     fn _wait_for_dep_dependencies(&self) -> bool {
         let msg_receiver = &self.dep_result_receiver;
         let total = self.total_dependencies;
@@ -164,5 +183,55 @@ impl Tx {
         }
 
         return !abort;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DepCode, Tx, TxID, TxManager};
+    use crossbeam_channel::{unbounded, Receiver};
+    use std::{sync::Arc, thread, time::Duration};
+
+    fn register_tx(mgr: &Arc<TxManager>, tx_id: TxID) -> Tx {
+        // tx1
+        let (dep_sender, dep_recv) = unbounded();
+        let (dep_result_sender, dep_result_recv) = unbounded();
+        mgr.register_channel(tx_id, dep_sender, dep_result_sender);
+        Tx::new(tx_id, dep_result_recv, dep_recv)
+    }
+
+    #[test]
+    fn simple_wait_for_sleeping_tx() {
+        let mgr = Arc::new(TxManager::new());
+        let mut tx1 = register_tx(&mgr, 1);
+        let tx2 = register_tx(&mgr, 2);
+        // tx1 depends on tx2
+        mgr.add_dep(1, 2);
+        tx1.total_dependencies = 1;
+        let t1 = thread::spawn(move || {
+            println!("tx1 waiting");
+            tx1._wait_for_dep_dependencies();
+            println!("tx1 done waiting");
+        });
+        let mgrclone1 = mgr.clone();
+        let mgrclone2 = mgr.clone();
+        let t2 = thread::spawn(move || {
+            let mut tx3 = register_tx(&mgrclone1, 3);
+            mgrclone1.add_dep(3, 2);
+            println!("tx3 waiting");
+            tx3.total_dependencies = 1;
+            tx3._wait_for_dep_dependencies();
+            println!("tx3 done waiting");
+        });
+        let t3 = thread::spawn(move || {
+            // to something and commit
+            println!("tx2 sleeping");
+            thread::sleep(Duration::from_secs(3));
+            println!("tx2 done sleeping");
+            mgrclone2.wait_for_dependencies(tx2);
+        });
+        t1.join().unwrap();
+        t2.join().unwrap();
+        t3.join().unwrap();
     }
 }
