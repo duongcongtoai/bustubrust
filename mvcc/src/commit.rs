@@ -200,7 +200,6 @@ mod tests {
     use std::{sync::Arc, thread, time::Duration};
 
     fn register_tx(mgr: &Arc<TxManager>, tx_id: TxID) -> Tx {
-        // tx1
         let (dep_sender, dep_recv) = unbounded();
         let (dep_result_sender, dep_result_recv) = unbounded();
         mgr.register_channel(tx_id, dep_sender, dep_result_sender);
@@ -248,6 +247,7 @@ mod tests {
     #[test]
     fn chaining_doubble_dependencies() {
         let mgr = Arc::new(TxManager::new());
+        // depends on those tx first
         let tx1 = register_tx(&mgr, 1);
         let tx2 = register_tx(&mgr, 2);
 

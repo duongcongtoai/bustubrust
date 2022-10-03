@@ -1,5 +1,5 @@
-[build]
-rustflags = ["-C", "link-args=-lc","-A","dead_code","-A","unused_variables"]
+# [build]
+# rustflags = ["-C", "link-args=-lc","-A","dead_code","-A","unused_variables"]
 
 [target.sometarget]
 runner = ".cargo/codelldb.sh"
