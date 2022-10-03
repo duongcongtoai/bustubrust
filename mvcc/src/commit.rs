@@ -109,7 +109,12 @@ impl TxManager {
         }
     }
 
-    fn wait_and_announce(&self, tx: Tx) {
+    fn abort_and_announce(&self, tx: Tx) {
+        self.commit_dep_result_sender.remove(&tx.id).unwrap();
+        self.announce_tx_result(tx, DepCode::Abort);
+    }
+
+    fn wait_and_announce(&self, tx: Tx) -> bool {
         // each tx before this step has successfully registered itself to its dependencies
         //
         // SAFETY: we guarantee that they will eventually send a signal back to us, or deadlock
@@ -142,6 +147,7 @@ impl TxManager {
             announce_code = DepCode::Success;
         }
         self.announce_tx_result(tx, announce_code);
+        do_commit
     }
 }
 impl Tx {
@@ -189,8 +195,8 @@ impl Tx {
 
 #[cfg(test)]
 mod tests {
-    use super::{DepCode, Tx, TxID, TxManager};
-    use crossbeam_channel::{unbounded, Receiver};
+    use super::{Tx, TxID, TxManager};
+    use crossbeam_channel::unbounded;
     use std::{sync::Arc, thread, time::Duration};
 
     fn register_tx(mgr: &Arc<TxManager>, tx_id: TxID) -> Tx {
@@ -199,6 +205,44 @@ mod tests {
         let (dep_result_sender, dep_result_recv) = unbounded();
         mgr.register_channel(tx_id, dep_sender, dep_result_sender);
         Tx::new(tx_id, dep_result_recv, dep_recv)
+    }
+
+    #[test]
+    fn cascading_abort() {
+        let mgr = Arc::new(TxManager::new());
+        let mut primitive_txs = vec![];
+
+        for i in 0..10 {
+            primitive_txs.push(register_tx(&mgr, i));
+        }
+
+        let mut joinhandles = vec![];
+
+        // tx in 1 group depends on the same txid
+        for child_tx in 11..100 {
+            let mgrcloned = mgr.clone();
+            let mut tx = register_tx(&mgrcloned, child_tx);
+            for tx in primitive_txs.iter() {
+                assert!(mgrcloned.add_dep(child_tx, tx.id));
+            }
+
+            let t = thread::spawn(move || {
+                tx.total_dependencies = 1;
+                // assert this tx is aborted
+                assert!(!mgrcloned.wait_and_announce(tx));
+            });
+            joinhandles.push(t);
+        }
+        thread::sleep(Duration::from_secs(1));
+        let last_tx = primitive_txs.pop().unwrap();
+        // only abort one and expect the following code returns
+        mgr.abort_and_announce(last_tx);
+        for t in joinhandles.into_iter() {
+            t.join().unwrap();
+        }
+        for tx in primitive_txs {
+            assert!(mgr.wait_and_announce(tx));
+        }
     }
 
     #[test]
