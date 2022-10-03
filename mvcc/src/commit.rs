@@ -1,5 +1,5 @@
 use crossbeam_channel::{Receiver, Sender};
-use dashmap::DashMap;
+use dashmap::{mapref::multiple::RefMulti, DashMap};
 use log::debug;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -13,9 +13,10 @@ pub struct Tx {
 }
 pub type TxID = u64;
 
+unsafe impl Sync for TxManager {}
+unsafe impl Send for TxManager {}
+
 pub struct TxManager {
-    // inner: DashMap<TxID, Arc<Tx>>,
-    // hold address of tx
     commit_dep_senders: DashMap<TxID, Sender<TxID>>,
     commit_dep_result_sender: DashMap<TxID, Sender<(TxID, DepCode)>>,
 }
@@ -48,62 +49,29 @@ impl TxManager {
             .insert(tx_id, dep_result_sender);
     }
 
-    fn add_dep(&self, tx_id: TxID, dep_id: TxID) -> bool {
-        let sender = self.commit_dep_senders.get(&dep_id).unwrap();
-        let mut success = false;
-        match sender.send(tx_id) {
-            Ok(_) => {}
-            Err(msg) => {
-                success = false;
-                debug!("tx_id {} failed to register its dependencies with tx_id {} because the receiver may have been droped",
-                    tx_id,dep_id);
-            }
-        }
-        return success;
+    fn add_dep(&self, tx_id: TxID, depend_on: TxID) -> bool {
+        let maybe_registerer = self.commit_dep_senders.get(&depend_on);
 
-        // get its channel for map
-        // drop the sender from the map
-        //
-        // use its receivers to receive ids of tx that depends on it
-        // get receiver's channel and send signal commit/abort to them
-        //
-        // if the channel is not found, it means they have already aborted, check if sending
-        // to the channel return error, if the receiver obj has been dropped
+        match maybe_registerer {
+            Some(sender) => {
+                let mut success = true;
+                match sender.send(tx_id) {
+                    Ok(_) => {}
+                    Err(msg) => {
+                        success = false;
+                        debug!("tx_id {} failed to register its dependencies with tx_id {} because the receiver may have been droped",
+                    tx_id,depend_on);
+                    }
+                }
+                return success;
+            }
+            None => {
+                return false;
+            }
+        };
     }
 
-    fn wait_for_dependencies(&self, tx: Tx) {
-        // each tx before this step has successfully registered itself to its dependencies
-        //
-        // SAFETY: we guarantee that they will eventually send a signal back to us, or deadlock
-        // will occur
-        //
-        // each tx holds its own receiver channel, gives the sender channel to the tx manager
-        //
-        // if it find any abort signal, it can abort early, but extra tings need to be considered:
-        // - what if other dependencies want to notify an aborted dependee? two case:
-        // - dependencies found the receiver's sender channel in the global hashmap, and sends to
-        // and aborted tx, will this cause memory leak?
-        // - dependencies cannot find the receiver's sender channel, can this be implicitly
-        // referred to as this tx has aborted?
-        //
-        // can use receiver.iter().collect() to block until the senders are dropped
-        // but we can cancel early
-        //
-        let do_commit = tx._wait_for_dep_dependencies();
-
-        // SAFETY: early abort will results in situation that
-        // other dep_tx wants to notify this tx about its result, they won't be
-        // able to bc we have removed this items, need to check crossbeam channel behaviour what
-        // happens if such event occured
-        // ------------------------------------------------------
-        // other tx does not need to notify me about their result anymore, in case i abort
-        // they can ignore error and continue
-        self.commit_dep_result_sender.remove(&tx.id).unwrap();
-        let mut announce_code = DepCode::Abort;
-        if do_commit {
-            announce_code = DepCode::Success;
-        }
-
+    fn announce_tx_result(&self, tx: Tx, announce_code: DepCode) {
         // no other tx can register me as their dependencies
         // if they somehow acquire me after this code runs, they still hold a reference to one copy
         // of sender obj, then my next code will block until that copied sender is dropped :D
@@ -139,8 +107,41 @@ impl TxManager {
                 }
             }
         }
+    }
 
-        // must announce its dependencies about its result
+    fn wait_and_announce(&self, tx: Tx) {
+        // each tx before this step has successfully registered itself to its dependencies
+        //
+        // SAFETY: we guarantee that they will eventually send a signal back to us, or deadlock
+        // will occur
+        //
+        // each tx holds its own receiver channel, gives the sender channel to the tx manager
+        //
+        // if it find any abort signal, it can abort early, but extra things need to be considered:
+        // - what if other dependencies want to notify an aborted dependee? two case:
+        // - dependencies found the receiver's sender channel in the global hashmap, and sends to
+        // and aborted tx, will this cause memory leak?
+        // - dependencies cannot find the receiver's sender channel, can this be implicitly
+        // referred to as this tx has aborted?
+        //
+        // can use receiver.iter().collect() to block until the senders are dropped
+        // but we can cancel early
+        //
+        let do_commit = tx._wait_for_dep_dependencies();
+
+        // SAFETY: early abort will results in situation that
+        // other dep_tx wants to notify this tx about its result, they won't be
+        // able to bc we have removed this items, need to check crossbeam channel behaviour what
+        // happens if such event occured
+        // ------------------------------------------------------
+        // other tx does not need to notify me about their result anymore, in case i abort
+        // they can ignore error and continue
+        self.commit_dep_result_sender.remove(&tx.id).unwrap();
+        let mut announce_code = DepCode::Abort;
+        if do_commit {
+            announce_code = DepCode::Success;
+        }
+        self.announce_tx_result(tx, announce_code);
     }
 }
 impl Tx {
@@ -201,37 +202,37 @@ mod tests {
     }
 
     #[test]
-    fn simple_wait_for_sleeping_tx() {
+    fn chaining_doubble_dependencies() {
         let mgr = Arc::new(TxManager::new());
-        let mut tx1 = register_tx(&mgr, 1);
+        let tx1 = register_tx(&mgr, 1);
         let tx2 = register_tx(&mgr, 2);
-        // tx1 depends on tx2
-        mgr.add_dep(1, 2);
-        tx1.total_dependencies = 1;
-        let t1 = thread::spawn(move || {
-            println!("tx1 waiting");
-            tx1._wait_for_dep_dependencies();
-            println!("tx1 done waiting");
-        });
-        let mgrclone1 = mgr.clone();
-        let mgrclone2 = mgr.clone();
-        let t2 = thread::spawn(move || {
-            let mut tx3 = register_tx(&mgrclone1, 3);
-            mgrclone1.add_dep(3, 2);
-            println!("tx3 waiting");
-            tx3.total_dependencies = 1;
-            tx3._wait_for_dep_dependencies();
-            println!("tx3 done waiting");
-        });
-        let t3 = thread::spawn(move || {
-            // to something and commit
-            println!("tx2 sleeping");
-            thread::sleep(Duration::from_secs(3));
-            println!("tx2 done sleeping");
-            mgrclone2.wait_for_dependencies(tx2);
-        });
-        t1.join().unwrap();
-        t2.join().unwrap();
-        t3.join().unwrap();
+
+        let mut joinhandles = vec![];
+
+        let mut last_tx = (1, 2);
+        // tx in 1 group depends on the same txid
+        for group in 2..5 {
+            for offset in 1..5 {
+                let mgrcloned = mgr.clone();
+                let this_tx_id = group * 10 + offset;
+                let mut tx = register_tx(&mgrcloned, this_tx_id);
+                assert!(mgrcloned.add_dep(this_tx_id, last_tx.0));
+                assert!(mgrcloned.add_dep(this_tx_id, last_tx.1));
+
+                let t = thread::spawn(move || {
+                    tx.total_dependencies = 2;
+                    mgrcloned.wait_and_announce(tx);
+                });
+                joinhandles.push(t);
+            }
+            last_tx = (group * 10 + 1, group * 10 + 2);
+        }
+        thread::sleep(Duration::from_secs(1));
+        mgr.wait_and_announce(tx1);
+        mgr.wait_and_announce(tx2);
+
+        for t in joinhandles.into_iter() {
+            t.join().unwrap();
+        }
     }
 }
