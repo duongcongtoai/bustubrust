@@ -2,4 +2,4 @@
 test:
 	cargo test
 test-cover:
-	cargo tarpaulin --manifest-path Cargo.toml 
+	cargo tarpaulin --manifest-path Cargo.toml -- 
