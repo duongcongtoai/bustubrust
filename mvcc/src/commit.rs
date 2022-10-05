@@ -1,7 +1,6 @@
 use crossbeam_channel::{Receiver, Sender};
-use dashmap::{mapref::multiple::RefMulti, DashMap};
+use dashmap::DashMap;
 use log::debug;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 pub struct Tx {
     id: TxID,
