@@ -14,3 +14,8 @@ Exercises
 - [ ] Distinct
 ## Credit 
 - Some code was copied from https://github.com/erikgrinaker/toydb
+
+## Things to investigate:
+- Column family
+- Tile based storage
+- Different types of mvcc/gc engine combination and benchmark them all

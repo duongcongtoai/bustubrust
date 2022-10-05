@@ -7,26 +7,26 @@ pub trait TxManager {
     // check whether a tuple is visible to current transaction.
     // in this protocol, we require that a transaction cannot see other
     // transaction's local copy.
-    fn is_visible(h: TileGroupHeader, tuple_id: u64) -> Visibility {
+    fn is_visible(tuple_id: u64) -> Visibility {
         Visibility::Invisible
     }
 
     // check whether the current transaction owns the tuple.
     // this function is called by update/delete executors.
-    fn is_owner(h: TileGroupHeader, tuple_id: u64) -> bool {
+    fn is_owner(tuple_id: u64) -> bool {
         false
     }
 
     // if the tuple is not owned by any transaction and is visible to current
     // transaction.
     // this function is called by update/delete executors.
-    fn is_ownable(h: TileGroupHeader, tuple_id: u64) -> bool {
+    fn is_ownable(tuple_id: u64) -> bool {
         false
     }
 
     // get write lock on a tuple.
     // this is invoked by update/delete executors.
-    fn acquire_ownership(h: TileGroupHeader, tile_group_id: u64, tuple_id: u64) -> bool {
+    fn acquire_ownership(tile_group_id: u64, tuple_id: u64) -> bool {
         false
     }
 
@@ -55,5 +55,3 @@ pub enum Visibility {
     Deleted,
     Visible,
 }
-
-pub struct TileGroupHeader {}
