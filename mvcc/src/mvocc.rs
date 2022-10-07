@@ -1,6 +1,6 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
+use crate::types::Tx;
 use dashmap::DashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /* pub struct Ts {
     tx_id: u64,
@@ -42,16 +42,6 @@ type VersionChain = Vec<Tuple>;
 
 pub struct MVOCC {
     index: DashMap<String, VersionChain>,
-}
-pub struct Tx {
-    begin_ts: u32,
-    state: TxPhase,
-}
-pub enum TxPhase {
-    Processing,
-    Preparing,
-    Comitted,
-    Aborted,
 }
 
 pub struct OccTx {
