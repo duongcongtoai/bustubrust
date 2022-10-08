@@ -58,9 +58,9 @@ where
                 let old_location = ItemPointer::new(self.block_id, tuple_id);
                 let old_tuple = data_table.get_data_tuple(old_location);
                 self.project_info.evaluate_single(new_tuple, old_tuple);
+                // TODO: logic related to index mgmt
 
                 T::perform_update(tx, old_location, new_location, false);
-                // TODO: how to recognize conflict here
             }
         }
         true
