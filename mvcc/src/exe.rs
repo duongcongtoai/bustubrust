@@ -27,9 +27,22 @@ where
     /// -- case failure:
     fn update_execute(&self, tx: &Tx, tuple_ids: Vec<Oid>) -> bool {
         for tuple_id in tuple_ids {
-            if T::acquire_ownership(tx, tuple_id) {
-                // TODO
+            // This happens when the previous executor has already made some change to this tuple
+            // and in this executor, we make change to it again, then we only need to update the
+            // version previous created by the previous executor
+            if T::is_owner(tx, tuple_id) {
+                let mut data_table = self.data_table.borrow_mut();
+                let old_location = ItemPointer::new(self.block_id, tuple_id);
+                let old_tuple = data_table.get_data_tuple(old_location);
+                self.project_info.evaluate_inplace(old_tuple);
+
+                // TODO: i don't know if other special mvcc impl has other logic to deal inside
+                // txmanager or not. For MVOCC, it only need this. maybe just directly call tx's method for now
+                // tx hold a list of updated item, must announce this to it
+                tx.record_update(old_location);
+            // TODO
             } else if T::is_ownable(tx, tuple_id) {
+                // some other tx has alread hold write lock on this tx, abort
                 if !T::acquire_ownership(tx, tuple_id) {
                     log::trace!(
                         "failed to acquire ownership on tuple {}, aborting txn {}",
@@ -56,7 +69,9 @@ where
 pub struct DataTable {}
 
 impl DataTable {
-    fn get_data_tuple(&mut self, block_id: ItemPointer) -> ContainerTuple {
+    /// This obj abstracts a huge memory region, it will return the memory segment of the given
+    /// tuple_id, but abstracted inside a ContainerTuple to allow inplace update
+    fn get_data_tuple(&mut self, tuple_id: ItemPointer) -> ContainerTuple {
         unimplemented!()
     }
 
@@ -82,6 +97,9 @@ pub struct ProjectInfo {
     target_list: Vec<Target>,
 }
 impl ProjectInfo {
+    fn evaluate_inplace(&self, dest: ContainerTuple) -> bool {
+        false
+    }
     fn evaluate_single(&self, dest: ContainerTuple, t1: ContainerTuple) -> bool {
         false
     }
@@ -108,5 +126,6 @@ impl Expression {
 }
 /// Hold pointer to memory region of the underlying tuple
 /// used for inplace update
+#[derive(Clone)]
 pub struct ContainerTuple {}
 pub struct Value {}

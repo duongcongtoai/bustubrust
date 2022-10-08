@@ -53,6 +53,12 @@ pub struct Tx {
     // where i get my dependent
     dep_registrations: Receiver<TxID>,
 }
+
+impl Tx {
+    pub fn record_update(&self, location: ItemPointer) {
+        !unimplemented!()
+    }
+}
 pub type Oid = u32;
 
 #[derive(Copy, Clone)]
