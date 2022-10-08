@@ -1,6 +1,10 @@
 use std::cell::RefCell;
 
-use crate::{types::Tx, ItemPointer, Oid, TxManager};
+use crate::{
+    storage::{DataTable, ProjectInfo},
+    types::Tx,
+    ItemPointer, Oid, TxManager,
+};
 
 pub struct Update<T: TxManager> {
     tx_manager: T,
@@ -41,9 +45,9 @@ where
                 // tx hold a list of updated item, must announce this to it
                 tx.record_update(old_location);
             // TODO
-            } else if T::is_ownable(tx, tuple_id) {
+            } else if T::modname::is_ownable(tx, tuple_id) {
                 // some other tx has alread hold write lock on this tx, abort
-                if !T::acquire_ownership(tx, tuple_id) {
+                if !T::modname::acquire_ownership(tx, tuple_id) {
                     log::trace!(
                         "failed to acquire ownership on tuple {}, aborting txn {}",
                         tuple_id,
@@ -60,72 +64,9 @@ where
                 self.project_info.evaluate_single(new_tuple, old_tuple);
                 // TODO: logic related to index mgmt
 
-                T::perform_update(tx, old_location, new_location, false);
+                T::modname::perform_update(tx, old_location, new_location, false);
             }
         }
         true
     }
 }
-pub struct DataTable {}
-
-impl DataTable {
-    /// This obj abstracts a huge memory region, it will return the memory segment of the given
-    /// tuple_id, but abstracted inside a ContainerTuple to allow inplace update
-    fn get_data_tuple(&mut self, tuple_id: ItemPointer) -> ContainerTuple {
-        unimplemented!()
-    }
-
-    // allocate a new region in memory (datablock) and return location of that memory region/data
-    // block
-    fn acquire_version(&mut self) -> ItemPointer {
-        unimplemented!()
-    }
-
-    // this method is related to index management, complex logic related to secondary index,
-    // depends on the type (type_tuple, type_version), need to read in the paper more
-    fn install_version(
-        &mut self,
-        tuple: ContainerTuple,
-        location: ItemPointer,
-        target_list: Vec<Target>,
-        master_ptr: ItemPointer,
-    ) -> bool {
-        unimplemented!()
-    }
-}
-pub struct ProjectInfo {
-    target_list: Vec<Target>,
-}
-impl ProjectInfo {
-    fn evaluate_inplace(&self, dest: ContainerTuple) -> bool {
-        false
-    }
-    fn evaluate_single(&self, dest: ContainerTuple, t1: ContainerTuple) -> bool {
-        false
-    }
-    fn evaluate_double(
-        &self,
-        dest: ContainerTuple,
-        t1: ContainerTuple,
-        t2: ContainerTuple,
-    ) -> bool {
-        false
-    }
-}
-pub struct Target {
-    col_id: Oid,
-    expr: Expression,
-}
-
-pub struct Expression {}
-
-impl Expression {
-    fn evaluate(t1: ContainerTuple, t2: ContainerTuple) -> Value {
-        unimplemented!()
-    }
-}
-/// Hold pointer to memory region of the underlying tuple
-/// used for inplace update
-#[derive(Clone)]
-pub struct ContainerTuple {}
-pub struct Value {}
