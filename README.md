@@ -19,3 +19,4 @@ Exercises
 - Column family
 - Tile based storage
 - Different types of mvcc/gc engine combination and benchmark them all
+- PAX storage layout implemented in NoisePage
