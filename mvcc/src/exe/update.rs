@@ -45,9 +45,9 @@ where
                 // tx hold a list of updated item, must announce this to it
                 tx.record_update(old_location);
             // TODO
-            } else if T::modname::is_ownable(tx, tuple_id) {
+            } else if T::is_ownable(tx, tuple_id) {
                 // some other tx has alread hold write lock on this tx, abort
-                if !T::modname::acquire_ownership(tx, tuple_id) {
+                if !T::acquire_ownership(tx, tuple_id) {
                     log::trace!(
                         "failed to acquire ownership on tuple {}, aborting txn {}",
                         tuple_id,
@@ -64,7 +64,7 @@ where
                 self.project_info.evaluate_single(new_tuple, old_tuple);
                 // TODO: logic related to index mgmt
 
-                T::modname::perform_update(tx, old_location, new_location, false);
+                T::perform_update(tx, old_location, new_location, false);
             }
         }
         true

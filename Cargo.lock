@@ -882,9 +882,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.122"
+version = "0.2.135"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ec647867e2bf0772e28c8bcde4f0d19a9216916e890543b5a03ed8ef27b8f259"
+checksum = "68783febc7782c6c5cb401fbda4de5a9898be1762314da0bb2c10ced61f18b0c"
 
 [[package]]
 name = "lock_api"
@@ -1018,6 +1018,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
  "dashmap 5.4.0",
+ "libc",
  "log",
  "parking_lot 0.12.1",
 ]
