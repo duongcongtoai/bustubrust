@@ -1,22 +1,24 @@
 use std::{
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     os::unix::{io::IntoRawFd, prelude::OpenOptionsExt},
     ptr::{null, null_mut},
 };
 
 use libc::c_void;
 
-pub struct StorageManager {}
+pub struct StorageManager {
+    filepath: String,
+}
 
 impl StorageManager {
-    fn allocate(size: usize) -> *mut c_void {
+    pub fn allocate(&self, size: usize) -> *mut c_void {
         let file = OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(true)
             .mode(0o777)
-            .open("./temp")
+            .open(&self.filepath)
             .expect("open mmap file");
         let fd = file.into_raw_fd();
         let data_file_len = 512 * 1024 * 1024;

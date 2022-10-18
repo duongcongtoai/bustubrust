@@ -11,6 +11,7 @@ pub struct MvOcc {
 
 impl TxManager for MvOcc {
     fn is_visible(tx: &Tx, tuple_id: Oid) -> Visibility {
+        unimplemented!()
         /*
         txn_id_t tuple_txn_id = tile_group_header->GetTransactionId(tuple_id);
         cid_t tuple_begin_cid = tile_group_header->GetBeginCommitId(tuple_id);

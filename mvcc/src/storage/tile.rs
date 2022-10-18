@@ -1,35 +1,72 @@
-use std::{collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+
+use libc::c_void;
+
+use super::manager::StorageManager;
 
 pub struct TileGroup {
-    tile: Vec<Tile>,
+    tiles: Vec<Tile>,
     schemas: Vec<Schema>,
     col_map: HashMap<usize, (usize, usize)>,
 }
 
 impl TileGroup {
     fn new(
+        storage: &StorageManager,
         schemas: Vec<Schema>,
         col_map: HashMap<usize, (usize, usize)>,
         tuple_count: usize,
-    ) -> Self {
-        let tilegroup_header = TileGroupHeader::new(tuple_count);
-        for i in 0..schemas.len() {
-            let tile = Tile::new();
+    ) -> Rc<RefCell<Self>> {
+        let tilegroup_header = TileGroupHeader::new(storage, tuple_count);
+        let shared_header = Rc::new(RefCell::new(tilegroup_header));
+        let tile_group = TileGroup {
+            tiles: vec![],
+            schemas,
+            col_map,
+        };
+        let shared_tg = Rc::new(RefCell::new(tile_group));
+        for i in 0..shared_tg.borrow().schemas.len() {
+            let tile = Tile::new(
+                storage,
+                shared_header.clone(),
+                shared_tg.clone(),
+                &shared_tg.borrow().schemas[i],
+                tuple_count,
+            );
+            shared_tg.borrow_mut().tiles.push(tile);
         }
-        false;
+        shared_tg
     }
 }
-pub struct Tile {}
+pub struct Tile {
+    data: *mut c_void,
+    tile_group: Rc<RefCell<TileGroup>>,
+    tile_group_header: Rc<RefCell<TileGroupHeader>>,
+}
 
 impl Tile {
-    fn new(tile_header: Rc<TileGroupHeader>, schema: Schema, tuple_count: usize) -> Self {
+    fn new(
+        storage: &StorageManager,
+        tile_group_header: Rc<RefCell<TileGroupHeader>>,
+        tile_group: Rc<RefCell<TileGroup>>,
+        schema: &Schema,
+        tuple_count: usize,
+    ) -> Self {
         let tile_size = tuple_count * schema.tuple_length;
+        let data = storage.allocate(tile_size);
+        Tile {
+            data,
+            tile_group,
+            tile_group_header,
+        }
     }
 }
 pub struct TileGroupHeader {}
 
 impl TileGroupHeader {
-    fn new(tuple_count: usize) -> Self {}
+    fn new(storage: &StorageManager, tuple_count: usize) -> Self {
+        unimplemented!()
+    }
 }
 
 pub struct Schema {
@@ -41,11 +78,11 @@ pub struct Schema {
     tuple_length: usize,
 }
 impl Schema {
-    fn new(cols: Vec<Column>) -> Self {
+    fn new(mut cols: Vec<Column>) -> Self {
         let (mut col_types, mut col_names, mut col_lengths, mut col_is_inlined) =
             (vec![], vec![], vec![], vec![]);
         for col in cols.iter() {
-            col_types.push(col.value_type);
+            col_types.push(col.value_type.clone());
             col_names.push(col.name.clone());
             col_lengths.push(col.length);
             col_is_inlined.push(col.is_inlined);
@@ -105,7 +142,7 @@ impl Column {
         }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ValueType {
     Integer,
     TinyInt,

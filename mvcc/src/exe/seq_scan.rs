@@ -1,9 +1,7 @@
 use std::cell::RefCell;
 
-use log::trace;
-
 use crate::{
-    storage::{DataTable, ProjectInfo},
+    storage::storage::{DataTable, ProjectInfo},
     types::Oid,
     TxManager,
 };
