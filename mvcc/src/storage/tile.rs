@@ -1,8 +1,12 @@
+use crate::types::Oid;
+use libc::c_void;
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
-use libc::c_void;
-
-use super::manager::StorageManager;
+use super::{
+    manager::StorageManager,
+    storage::{ContainerTuple, Value},
+    tuple::Tuple,
+};
 
 pub struct TileGroup {
     tiles: Vec<Tile>,
@@ -37,11 +41,14 @@ impl TileGroup {
         }
         shared_tg
     }
+
+    fn get_tile() -> Tile {}
 }
 pub struct Tile {
     data: *mut c_void,
     tile_group: Rc<RefCell<TileGroup>>,
     tile_group_header: Rc<RefCell<TileGroupHeader>>,
+    schema: Schema,
 }
 
 impl Tile {
@@ -58,6 +65,7 @@ impl Tile {
             data,
             tile_group,
             tile_group_header,
+            schema: schema.clone(),
         }
     }
 }
@@ -68,7 +76,18 @@ impl TileGroupHeader {
         unimplemented!()
     }
 }
+pub struct LogicalTile {
+    position_lists: Vec<Vec<Oid>>,
+}
+impl LogicalTile {
+    fn new() -> Self {
+        LogicalTile {
+            position_lists: vec![],
+        }
+    }
+}
 
+#[derive(Clone)]
 pub struct Schema {
     cols: Vec<Column>,
     col_types: Vec<ValueType>,
@@ -78,7 +97,7 @@ pub struct Schema {
     tuple_length: usize,
 }
 impl Schema {
-    fn new(mut cols: Vec<Column>) -> Self {
+    pub fn new(mut cols: Vec<Column>) -> Self {
         let (mut col_types, mut col_names, mut col_lengths, mut col_is_inlined) =
             (vec![], vec![], vec![], vec![]);
         for col in cols.iter() {
@@ -103,16 +122,26 @@ impl Schema {
             tuple_length,
         }
     }
+    pub fn get_length(&self) -> usize {
+        self.tuple_length
+    }
+    pub fn get_type(&self, col_id: Oid) -> ValueType {
+        self.col_types[col_id as usize]
+    }
+    pub fn get_col_offset(&self, col_id: Oid) -> usize {
+        self.cols[col_id as usize].col_offset
+    }
 }
+#[derive(Clone)]
 pub struct Column {
     value_type: ValueType,
     length: usize,
     name: String,
     is_inlined: bool,
-    col_offset: usize,
+    col_offset: usize, // within a tuple, which byte to access this column value
 }
 impl Column {
-    fn new_dynamic<I: Into<String>>(value_type: ValueType, name: I, length: usize) -> Self {
+    pub fn new_dynamic<I: Into<String>>(value_type: ValueType, name: I, length: usize) -> Self {
         if let ValueType::Varchar = value_type {
             return Column {
                 value_type,
@@ -124,15 +153,9 @@ impl Column {
         }
         panic!("invalid value type")
     }
-    fn new_static<I: Into<String>>(value_type: ValueType, name: I) -> Self {
+    pub fn new_static<I: Into<String>>(value_type: ValueType, name: I) -> Self {
         let mut length = 0;
-        match value_type {
-            ValueType::Integer => length = 4,
-            ValueType::TinyInt => length = 1,
-            _ => {
-                panic!("type can't be static {:?}", value_type)
-            }
-        };
+        let length = value_type.get_length();
         Column {
             value_type,
             name: name.into(),
@@ -145,8 +168,21 @@ impl Column {
 #[derive(Debug, Clone)]
 pub enum ValueType {
     Integer,
+    Double,
     TinyInt,
     Varchar,
+}
+impl ValueType {
+    pub fn get_length(&self) -> usize {
+        match self {
+            ValueType::Integer => 4,
+            ValueType::TinyInt => 1,
+            ValueType::Double => 8,
+            _ => {
+                panic!("cannot get length of type {:?}", self)
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -165,5 +201,10 @@ mod tests {
         let schema1 = Schema::new(vec![col1, col2]);
         let schema2 = Schema::new(vec![col3, col4]);
         let schemas = vec![schema1, schema2];
+    }
+}
+pub fn populate_tile(schema: Schema, tile_group: &TileGroup, num_rows: usize) {
+    for tuple_id in 0..num_rows {
+        let tuple = Tuple::new(&schema);
     }
 }

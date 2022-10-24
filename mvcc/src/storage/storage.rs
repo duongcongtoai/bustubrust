@@ -1,8 +1,11 @@
 use crate::types::{ItemPointer, Oid};
 
+use super::manager::StorageManager;
+
 pub struct DataTable {}
 
 impl DataTable {
+    pub fn new(storage: &StorageManager) -> Self {}
     /// This obj abstracts a huge memory region, it will return the memory segment of the given
     /// tuple_id, but abstracted inside a ContainerTuple to allow inplace update
     pub fn get_data_tuple(&mut self, tuple_id: ItemPointer) -> ContainerTuple {
