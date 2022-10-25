@@ -41,8 +41,6 @@ impl TileGroup {
         }
         shared_tg
     }
-
-    fn get_tile() -> Tile {}
 }
 pub struct Tile {
     data: *mut c_void,
@@ -165,7 +163,7 @@ impl Column {
         }
     }
 }
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum ValueType {
     Integer,
     Double,

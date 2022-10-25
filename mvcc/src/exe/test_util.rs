@@ -1,14 +1,14 @@
 use crate::{
     storage::{
-        storage::DataTable,
+        table::DataTable,
         tile::{Column, Schema, ValueType},
-        tuple,
     },
     types::Oid,
 };
 
 pub fn create_table(tuple_per_tile_group: usize, table_id: Oid) -> DataTable {
-    let schema = Schema::new(vec![gen_col(1)]);
+    unimplemented!()
+    // let schema = Schema::new(vec![gen_col(1)]);
 }
 
 pub fn gen_col(index: usize) -> Column {
@@ -24,5 +24,5 @@ pub fn gen_col(index: usize) -> Column {
 }
 
 pub fn populated_value(tuple_id: Oid, column_id: Oid) -> i32 {
-    return 10 * tuple_id + column_id as i32;
+    return 10 * tuple_id as i32 + column_id as i32;
 }
