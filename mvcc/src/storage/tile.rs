@@ -1,17 +1,22 @@
-use crate::types::Oid;
+use crate::{storage::tuple::BorrowedTuple, types::Oid};
 use libc::c_void;
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    rc::Rc,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use super::{
     manager::StorageManager,
-    storage::{ContainerTuple, Value},
-    tuple::Tuple,
+    tuple::{Tuple, Value},
 };
 
 pub struct TileGroup {
     tiles: Vec<Tile>,
     schemas: Vec<Schema>,
     col_map: HashMap<usize, (usize, usize)>,
+    header: Rc<RefCell<TileGroupHeader>>,
 }
 
 impl TileGroup {
@@ -27,6 +32,7 @@ impl TileGroup {
             tiles: vec![],
             schemas,
             col_map,
+            header: shared_header.clone(),
         };
         let shared_tg = Rc::new(RefCell::new(tile_group));
         for i in 0..shared_tg.borrow().schemas.len() {
@@ -41,11 +47,34 @@ impl TileGroup {
         }
         shared_tg
     }
+
+    // for example col1,col2,col3,col4,col5, tile group has 2 tile, tile1 has col1,col2,col3 and
+    // tile2 has col4,col5
+    fn insert_tuple(&self, tuple: Tuple) -> Oid {
+        let tuple_slot_id = self.header.borrow().next_empty_tuple_slot();
+        if tuple_slot_id == u32::MAX {
+            return tuple_slot_id;
+        }
+        let mut col_iter = 0;
+        for tile_itr in 0..self.tiles.len() {
+            let schema = &self.schemas[tile_itr];
+            let col_count = schema.cols.len();
+            let tile = &self.tiles[tile_itr];
+            let tile_tuple_location = tile.get_tuple_location(tuple_slot_id);
+            let mut tile_tuple = BorrowedTuple::new(schema, tile_tuple_location);
+            for tile_column_iter in 0..col_count as Oid {
+                tile_tuple.set_value(tile_column_iter, tuple.get_value(col_iter));
+                col_iter += 1;
+            }
+        }
+        return tuple_slot_id;
+    }
 }
 pub struct Tile {
     data: *mut c_void,
     tile_group: Rc<RefCell<TileGroup>>,
     tile_group_header: Rc<RefCell<TileGroupHeader>>,
+    tile_size: usize,
     schema: Schema,
 }
 
@@ -61,17 +90,40 @@ impl Tile {
         let data = storage.allocate(tile_size);
         Tile {
             data,
+            tile_size,
             tile_group,
             tile_group_header,
             schema: schema.clone(),
         }
     }
+
+    fn get_tuple_location(&self, tuple_slot_id: Oid) -> &mut [u8] {
+        let mutptr = self.data as *mut u8;
+        unsafe {
+            let st = mutptr.add(tuple_slot_id as usize * self.schema.tuple_length as usize);
+            return std::slice::from_raw_parts_mut(st as *mut u8, self.tile_size);
+        }
+    }
 }
-pub struct TileGroupHeader {}
+pub struct TileGroupHeader {
+    next_tuple_slot: AtomicU32,
+    num_tuple_slot: usize,
+}
 
 impl TileGroupHeader {
     fn new(storage: &StorageManager, tuple_count: usize) -> Self {
-        unimplemented!()
+        TileGroupHeader {
+            num_tuple_slot: tuple_count,
+            next_tuple_slot: AtomicU32::new(0),
+        }
+    }
+
+    pub fn next_empty_tuple_slot(&self) -> Oid {
+        let tuple_slot_id = self.next_tuple_slot.fetch_add(1, Ordering::Relaxed);
+        if tuple_slot_id >= self.num_tuple_slot as u32 {
+            return u32::MAX;
+        }
+        return tuple_slot_id;
     }
 }
 pub struct LogicalTile {
@@ -186,8 +238,13 @@ impl ValueType {
 #[cfg(test)]
 mod tests {
     use super::{
-        Column, Schema,
+        Column, Schema, TileGroup,
         ValueType::{Integer, TinyInt, Varchar},
+    };
+    use crate::{
+        exe::test_util::populated_value,
+        storage::tuple::{Tuple, Value},
+        types::Oid,
     };
 
     #[test]
@@ -195,14 +252,18 @@ mod tests {
         let col1 = Column::new_static(Integer, "A");
         let col2 = Column::new_static(Integer, "B");
         let col3 = Column::new_static(TinyInt, "C");
-        let col4 = Column::new_dynamic(Varchar, "D", 50);
+        // let col4 = Column::new_dynamic(Varchar, "D", 50);
         let schema1 = Schema::new(vec![col1, col2]);
-        let schema2 = Schema::new(vec![col3, col4]);
+        let schema2 = Schema::new(vec![col3]);
         let schemas = vec![schema1, schema2];
     }
-}
-pub fn populate_tile(schema: Schema, tile_group: &TileGroup, num_rows: usize) {
-    for tuple_id in 0..num_rows {
-        let tuple = Tuple::new(&schema);
+    pub fn populate_tile(schema: Schema, tile_group: &TileGroup, num_rows: usize) {
+        for tuple_id in 0..num_rows as Oid {
+            let mut tuple = Tuple::new(&schema);
+            tuple.set_value(0, Value::new_integer(populated_value(tuple_id, 0)));
+            tuple.set_value(1, Value::new_integer(populated_value(tuple_id, 1)));
+            tuple.set_value(2, Value::new_double(populated_value(tuple_id, 2) as f64));
+            // todo: tilegroup.insert_tuple(), tx_manager.perform_insert()
+        }
     }
 }

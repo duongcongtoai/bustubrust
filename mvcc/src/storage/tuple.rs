@@ -6,6 +6,41 @@ pub struct Tuple {
     data: Vec<u8>,
     schema: Schema,
 }
+pub struct BorrowedTuple<'a> {
+    data: &'a mut [u8],
+    schema: Schema,
+}
+impl<'a> BorrowedTuple<'a> {
+    pub fn new(schema: &Schema, data: &'a mut [u8]) -> Self {
+        // todo: peloton round this number to be divisible by 4 somehow
+        BorrowedTuple {
+            data,
+            schema: schema.clone(),
+        }
+    }
+
+    /// TODO: support varlen type
+    pub fn set_value(&mut self, col_id: Oid, val: Value) {
+        let value_type = self.schema.get_type(col_id);
+        let value_location = self.get_data_ref_mut(col_id);
+        val.save_to_location(value_location, value_type.get_length());
+    }
+    pub fn get_value(&self, col_id: Oid) -> Value {
+        let value_type = self.schema.get_type(col_id);
+        let value_location = self.get_data_ref(col_id);
+        Value::new_from_location(value_location, value_type)
+    }
+
+    fn get_data_ref(&self, col_id: Oid) -> &[u8] {
+        let offset = self.schema.get_col_offset(col_id);
+        &self.data[offset..]
+    }
+
+    fn get_data_ref_mut(&mut self, col_id: Oid) -> &mut [u8] {
+        let offset = self.schema.get_col_offset(col_id);
+        &mut self.data[offset..]
+    }
+}
 
 impl Tuple {
     pub fn new(schema: &Schema) -> Self {
@@ -73,10 +108,12 @@ impl Value {
         let length = self.value_type.get_length();
         storage[..length].clone_from_slice(&self.raw[..length]);
     }
+
     pub fn get_integer(&self) -> i32 {
         assert!(matches!(self.value_type, ValueType::Integer));
         BigEndian::read_i32(&self.raw)
     }
+
     pub fn get_double(&self) -> f64 {
         assert!(matches!(self.value_type, ValueType::Double));
         BigEndian::read_f64(&self.raw)
