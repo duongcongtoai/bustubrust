@@ -1,6 +1,7 @@
-use super::tile::{Schema, ValueType};
-use crate::types::Oid;
+use crate::{storage::table::ValueType, types::Oid};
 use byteorder::{BigEndian, ByteOrder};
+
+use super::table::Schema;
 
 pub struct Tuple {
     data: Vec<u8>,
@@ -122,8 +123,9 @@ impl Value {
 
 #[cfg(test)]
 mod tests {
+    use crate::storage::table::{Column, Schema, ValueType};
+
     use super::{Tuple, Value};
-    use crate::storage::tile::{Column, Schema, ValueType};
 
     #[test]
     fn test_set_value() {

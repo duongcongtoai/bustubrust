@@ -1,8 +1,5 @@
 use crate::{
-    storage::{
-        table::DataTable,
-        tile::{Column, Schema, ValueType},
-    },
+    storage::table::{Column, DataTable, ValueType},
     types::Oid,
 };
 
