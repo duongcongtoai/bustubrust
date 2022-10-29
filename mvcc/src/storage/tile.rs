@@ -12,6 +12,7 @@ use super::{
     tuple::{Tuple, Value},
 };
 
+/// TODO: Deprecate this implementation and use column-based storage layout instead
 pub struct TileGroup {
     tiles: Vec<Tile>,
     schemas: Vec<Schema>,
