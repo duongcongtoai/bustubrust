@@ -9,6 +9,7 @@ use std::{
 
 use super::{
     manager::StorageManager,
+    table::Schema,
     tuple::{Tuple, Value},
 };
 
@@ -140,7 +141,7 @@ impl LogicalTile {
 
 #[cfg(test)]
 mod tests {
-    use super::{
+    /* use super::{
         Column, Schema, TileGroup,
         ValueType::{Integer, TinyInt, Varchar},
     };
@@ -159,5 +160,5 @@ mod tests {
         let schema1 = Schema::new(vec![col1, col2]);
         let schema2 = Schema::new(vec![col3]);
         let schemas = vec![schema1, schema2];
-    }
+    } */
 }

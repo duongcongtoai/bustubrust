@@ -7,6 +7,7 @@ pub struct DataTable {
     name: String,
     schema: Schema,
     tuples_per_tilegroup: usize,
+    last_tile_group: Oid,
 }
 
 pub fn populate_table(table: &DataTable, num_row: usize) {
@@ -21,7 +22,8 @@ pub fn populate_table(table: &DataTable, num_row: usize) {
 impl DataTable {
     pub fn fill_in_empty_tuple_slot(tuple: Tuple) {
         // call gc if there is an available recycled tuple slot -> minor, impl later
-        //
+        let mut try_count = 0;
+        loop {}
     }
 }
 
@@ -32,12 +34,12 @@ pub struct ItemPointer {
 
 #[derive(Clone)]
 pub struct Schema {
-    cols: Vec<Column>,
+    pub cols: Vec<Column>,
     col_types: Vec<ValueType>,
     col_names: Vec<String>,
     col_lengths: Vec<usize>,
     col_is_inlined: Vec<bool>,
-    tuple_length: usize,
+    pub tuple_length: usize,
 }
 impl Schema {
     pub fn new(mut cols: Vec<Column>) -> Self {

@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 
 use crate::{
-    storage::storage::{DataTable, ProjectInfo},
+    storage::{storage::ProjectInfo, table::DataTable},
     types::Oid,
     TxManager,
 };

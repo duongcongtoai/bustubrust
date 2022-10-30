@@ -1,10 +1,7 @@
+use crate::storage::table::DataTable;
 use std::cell::RefCell;
 
-use crate::{
-    storage::storage::{DataTable, ProjectInfo},
-    types::Tx,
-    ItemPointer, Oid, TxManager,
-};
+use crate::{storage::storage::ProjectInfo, types::Tx, ItemPointer, Oid, TxManager};
 
 pub struct Update<T: TxManager> {
     tx_manager: T,
@@ -30,7 +27,7 @@ where
     /// -- case success:
     /// -- case failure:
     fn update_execute(&self, tx: &Tx, tuple_ids: Vec<Oid>) -> bool {
-        for tuple_id in tuple_ids {
+        /* for tuple_id in tuple_ids {
             // This happens when the previous executor has already made some change to this tuple
             // and in this executor, we make change to it again, then we only need to update the
             // version previous created by the previous executor
@@ -67,6 +64,7 @@ where
                 T::perform_update(tx, old_location, new_location, false);
             }
         }
-        true
+        true */
+        unimplemented!()
     }
 }
