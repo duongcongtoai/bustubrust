@@ -15,6 +15,7 @@ use super::{
 
 /// TODO: Deprecate this implementation and use column-based storage layout instead
 pub struct TileGroup {
+    id: Oid,
     tiles: Vec<Tile>,
     schemas: Vec<Schema>,
     col_map: HashMap<usize, (usize, usize)>,
@@ -22,7 +23,15 @@ pub struct TileGroup {
 }
 
 impl TileGroup {
-    fn new(
+    pub fn get_allocated_tuple_count(&self) -> usize {
+        unimplemented!()
+    }
+    pub fn get_tile_group_id(&self) -> Oid {
+        self.id
+    }
+
+    pub fn new(
+        id: Oid,
         storage: &StorageManager,
         schemas: Vec<Schema>,
         col_map: HashMap<usize, (usize, usize)>,
@@ -31,6 +40,7 @@ impl TileGroup {
         let tilegroup_header = TileGroupHeader::new(storage, tuple_count);
         let shared_header = Rc::new(RefCell::new(tilegroup_header));
         let tile_group = TileGroup {
+            id,
             tiles: vec![],
             schemas,
             col_map,
@@ -52,7 +62,7 @@ impl TileGroup {
 
     // for example col1,col2,col3,col4,col5, tile group has 2 tile, tile1 has col1,col2,col3 and
     // tile2 has col4,col5
-    fn insert_tuple(&self, tuple: Tuple) -> Oid {
+    pub fn insert_tuple(&self, tuple: &Tuple) -> Oid {
         let tuple_slot_id = self.header.borrow().next_empty_tuple_slot();
         if tuple_slot_id == u32::MAX {
             return tuple_slot_id;

@@ -1,6 +1,4 @@
-use crate::types::{ItemPointer, Oid};
-
-use super::manager::StorageManager;
+use crate::types::Oid;
 
 /// Hold pointer to memory region of the underlying tuple
 /// used for inplace update

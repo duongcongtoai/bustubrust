@@ -60,6 +60,7 @@ impl Tx {
     }
 }
 pub type Oid = u32;
+pub const INVALID_OID: u32 = u32::MAX;
 
 #[derive(Copy, Clone)]
 pub struct ItemPointer {
