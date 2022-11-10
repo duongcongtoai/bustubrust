@@ -11,6 +11,9 @@ use crate::types::{ItemPointer, Oid, INVALID_OID};
 
 use super::{catalog, manager::StorageManager, tile::TileGroup, tuple::Tuple};
 
+pub type SharedTG = Rc<RefCell<TileGroup>>;
+pub type ColumnMap = HashMap<Oid, (Oid, Oid)>;
+
 pub struct DataTable {
     storage_manager: StorageManager,
     id: Oid,
@@ -20,36 +23,6 @@ pub struct DataTable {
     last_tile_group: AtomicU32,
     tile_groups: DashMap<Oid, SharedTG>,
     column_map: ColumnMap,
-}
-pub type SharedTG = Rc<RefCell<TileGroup>>;
-pub type ColumnMap = HashMap<Oid, (Oid, Oid)>;
-
-pub mod test_util {
-
-    use crate::types::Oid;
-
-    /// helloo
-    use super::{Column, DataTable, ValueType};
-
-    pub fn create_table() -> DataTable {
-        DataTable::new()
-    }
-
-    pub fn gen_col(index: usize) -> Column {
-        match index {
-            0 => Column::new_static(ValueType::Integer, "col_a"),
-            1 => Column::new_static(ValueType::Integer, "col_b"),
-            2 => Column::new_static(ValueType::Double, "col_c"),
-            3 => Column::new_dynamic(ValueType::Varchar, "col_d", 25),
-            _ => {
-                panic!("unknown column {}", index);
-            }
-        }
-    }
-
-    pub fn populated_value(tuple_id: Oid, column_id: Oid) -> i32 {
-        return 10 * tuple_id as i32 + column_id as i32;
-    }
 }
 
 impl DataTable {
@@ -137,6 +110,71 @@ impl DataTable {
         };
         table.add_default_tile_group();
         table
+    }
+}
+
+pub mod test_util {
+
+    use rand::{thread_rng, Rng};
+
+    use crate::{
+        storage::tuple::{Tuple, Value},
+        types::{Oid, INVALID_OID},
+    };
+
+    /// helloo
+    use super::{Column, DataTable, ValueType};
+
+    pub fn create_table() -> DataTable {
+        DataTable::new()
+    }
+
+    pub fn populate_table(table: &DataTable, num_rows: usize, is_random: bool) {
+        let schema = table.schema.clone();
+        for row_id in 0..num_rows as Oid {
+            let mut populated_tuple_id = row_id;
+
+            let tuple = Tuple::new(&schema);
+
+            let mut col_1_populated_tuple_id = populated_tuple_id;
+            let mut col_2_populated_tuple_id = populated_tuple_id;
+            if is_random {
+                col_1_populated_tuple_id = thread_rng().gen_range(0..(num_rows / 3) as Oid);
+                col_2_populated_tuple_id = thread_rng().gen();
+            }
+            tuple.set_value(
+                0,
+                Value::new_integer(get_populated_value(populated_tuple_id, 0)),
+            );
+            tuple.set_value(
+                1,
+                Value::new_integer(get_populated_value(col_1_populated_tuple_id, 1)),
+            );
+            tuple.set_value(
+                2,
+                Value::new_double(get_populated_value(col_2_populated_tuple_id, 2) as f64),
+            );
+            let location = table.insert_tuple(tuple);
+            assert_ne!(location.block, INVALID_OID);
+
+            //todo: tx manager.perform_insert
+        }
+    }
+
+    pub fn gen_col(index: usize) -> Column {
+        match index {
+            0 => Column::new_static(ValueType::Integer, "col_a"),
+            1 => Column::new_static(ValueType::Integer, "col_b"),
+            2 => Column::new_static(ValueType::Double, "col_c"),
+            3 => Column::new_dynamic(ValueType::Varchar, "col_d", 25),
+            _ => {
+                panic!("unknown column {}", index);
+            }
+        }
+    }
+
+    pub fn get_populated_value(tuple_id: Oid, column_id: Oid) -> i32 {
+        return 10 * tuple_id as i32 + column_id as i32;
     }
 }
 

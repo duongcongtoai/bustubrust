@@ -1,10 +1,11 @@
 use crate::types::Oid;
 
+use super::tuple::Value;
+
 /// Hold pointer to memory region of the underlying tuple
 /// used for inplace update
 #[derive(Clone)]
 pub struct ContainerTuple {}
-pub struct Value {}
 
 pub struct ProjectInfo {
     target_list: Vec<Target>,

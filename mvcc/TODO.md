@@ -7,3 +7,7 @@
   a vector of column
 - already implement insert_tuple for DataTable, next is implementing
   InsertExecutor in insert.rs file
+- implemented populate_table without tx_manager.perform_insert
+### Next steps:
+- InsertExecutor
+- txmanager.perform_insert
