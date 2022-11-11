@@ -19,7 +19,7 @@ pub struct TileGroup {
     tiles: Vec<Tile>,
     schemas: Vec<Schema>,
     col_map: HashMap<usize, (usize, usize)>,
-    header: Rc<RefCell<TileGroupHeader>>,
+    pub header: Rc<RefCell<TileGroupHeader>>,
 }
 
 impl TileGroup {

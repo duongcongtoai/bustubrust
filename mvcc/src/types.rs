@@ -65,7 +65,7 @@ pub const INVALID_OID: u32 = u32::MAX;
 #[derive(Copy, Clone)]
 pub struct ItemPointer {
     pub block: Oid,
-    offset: Oid,
+    pub offset: Oid,
 }
 impl ItemPointer {
     pub fn new(block: Oid, offset: Oid) -> Self {

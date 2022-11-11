@@ -11,3 +11,8 @@
 ### Next steps:
 - InsertExecutor
 - txmanager.perform_insert
+
+### In the middle of some detail
+- tile_group.get_header
+- rethink how this header is constructed (from a casted memory region or
+  what)

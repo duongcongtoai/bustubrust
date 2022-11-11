@@ -1,6 +1,7 @@
 use dashmap::DashMap;
 
 use crate::{
+    storage::catalog,
     types::{ItemPointer, Oid, Tx, Visibility},
     TxManager,
 };
@@ -94,7 +95,31 @@ impl TxManager for MvOcc {
     }
 
     fn perform_insert(tx: &Tx, location: ItemPointer) {
-        todo!()
+        let tile_group_id = location.block;
+        let tuple_id = location.offset;
+        let tile_group = catalog::get_tile_group(tile_group_id);
+        let tile_group_header = tile_group.header;
+        let tx_id = tx.id;
+        /* assert(tile_group_header->GetTransactionId(tuple_id) == INVALID_TXN_ID);
+        assert(tile_group_header->GetBeginCommitId(tuple_id) == MAX_CID);
+        assert(tile_group_header->GetEndCommitId(tuple_id) == MAX_CID); */
+
+        /* LOG_TRACE("PerformInsert (%u, %u)\n", location.block, location.offset);
+
+
+        tile_group_header->SetTransactionId(tuple_id, transaction_id);
+        // no need to set next item pointer.
+
+        // Add the new tuple into the insert set
+        current_txn->RecordInsert(location);
+
+        // Init the tuple reserved field
+        InitTupleReserved(tile_group_header, tuple_id);
+
+        // Write down the head pointer's address in tile group header
+        SetHeadPtr(tile_group_header, tuple_id, itemptr_ptr);
+
+        return true; */
     }
 
     fn perform_update(
