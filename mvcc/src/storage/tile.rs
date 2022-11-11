@@ -1,8 +1,12 @@
-use crate::{storage::tuple::BorrowedTuple, types::Oid};
+use crate::{
+    storage::tuple::BorrowedTuple,
+    types::{ItemPointer, Oid, TxID, CID},
+};
 use libc::c_void;
 use std::{
     cell::RefCell,
     collections::HashMap,
+    mem::size_of,
     rc::Rc,
     sync::atomic::{AtomicU32, Ordering},
 };
@@ -120,13 +124,30 @@ impl Tile {
 pub struct TileGroupHeader {
     next_tuple_slot: AtomicU32,
     num_tuple_slot: usize,
+    data: *mut c_void,
 }
 
+static RESERVED_SIZE: usize = 28;
+// *  -----------------------------------------------------------------------------
+// *  | TxnID (8 bytes)  | BeginTimeStamp (8 bytes) | EndTimeStamp (8 bytes) | Master Pointer (8 Bytes)
+// *  | NextItemPointer (8 bytes) | PrevItemPointer (8 bytes) |
+// *  | ReservedField (24 bytes) | InsertCommit (1 byte) | DeleteCommit (1 byte)
+// *  -----------------------------------------------------------------------------
+static HEADER_ENTRY_SIZE: usize = size_of::<TxID>()
+    + 2 * size_of::<CID>()
+    + 3 * size_of::<ItemPointer>()
+    + RESERVED_SIZE
+    + 2 * size_of::<bool>();
+
 impl TileGroupHeader {
+    // pub fn set_transaction_id()
     fn new(storage: &StorageManager, tuple_count: usize) -> Self {
+        let header_size = tuple_count * HEADER_ENTRY_SIZE;
+        let data = storage.allocate(header_size);
         TileGroupHeader {
             num_tuple_slot: tuple_count,
             next_tuple_slot: AtomicU32::new(0),
+            data,
         }
     }
 
