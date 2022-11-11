@@ -139,7 +139,7 @@ pub mod test_util {
             let mut col_1_populated_tuple_id = populated_tuple_id;
             let mut col_2_populated_tuple_id = populated_tuple_id;
             if is_random {
-                // this is to ensure column1 always have duplicate value
+                // to ensure this column always have duplicate value
                 col_1_populated_tuple_id = thread_rng().gen_range(0..(num_rows / 3) as Oid);
                 col_2_populated_tuple_id = thread_rng().gen();
             }
@@ -174,6 +174,8 @@ pub mod test_util {
         }
     }
 
+    /// I don't know why we should do this, maybe this is a indirection layer, given the location
+    /// we know its value
     pub fn get_populated_value(tuple_id: Oid, column_id: Oid) -> i32 {
         return 10 * tuple_id as i32 + column_id as i32;
     }

@@ -13,3 +13,8 @@
 - txmanager.perform_insert
 - executor_test_util.cpp also uses this method, maybe trying that
 - the main point is see how the benchmark works
+
+### In the middle of some detail
+- tile_group.get_header
+- rethink how this header is constructed (from a casted memory region or
+  what)
