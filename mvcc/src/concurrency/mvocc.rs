@@ -93,7 +93,7 @@ impl TxManager for MvOcc {
         todo!()
     }
 
-    fn perform_insert(tx: &Tx, location: ItemPointer) {
+    pub fn perform_insert(tx: &Tx, location: ItemPointer) {
         todo!()
     }
 

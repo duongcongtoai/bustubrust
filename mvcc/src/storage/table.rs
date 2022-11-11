@@ -139,6 +139,7 @@ pub mod test_util {
             let mut col_1_populated_tuple_id = populated_tuple_id;
             let mut col_2_populated_tuple_id = populated_tuple_id;
             if is_random {
+                // this is to ensure column1 always have duplicate value
                 col_1_populated_tuple_id = thread_rng().gen_range(0..(num_rows / 3) as Oid);
                 col_2_populated_tuple_id = thread_rng().gen();
             }
