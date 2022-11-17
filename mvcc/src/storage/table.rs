@@ -60,6 +60,10 @@ impl DataTable {
         // TODO: is Relaxed safe here?
         self.last_tile_group.store(tile_group_id, Ordering::Relaxed);
         self.tile_groups.insert(tile_group_id, tile_group);
+        let raw_tilegroup = unsafe { (*tile_group).as_ptr() };
+        // TODO: this is not thread safe =))
+        catalog::set_tile_group(tile_group_id, raw_tilegroup);
+
         return tile_group_id;
     }
 
