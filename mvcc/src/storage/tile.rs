@@ -23,10 +23,13 @@ pub struct TileGroup {
     tiles: Vec<Tile>,
     schemas: Vec<Schema>,
     col_map: HashMap<usize, (usize, usize)>,
-    pub header: Rc<RefCell<TileGroupHeader>>,
+    header: Rc<RefCell<TileGroupHeader>>,
 }
 
 impl TileGroup {
+    pub fn get_header(&self) -> Rc<RefCell<TileGroupHeader>> {
+        self.header.clone()
+    }
     pub fn get_allocated_tuple_count(&self) -> usize {
         unimplemented!()
     }
@@ -157,6 +160,15 @@ impl TileGroupHeader {
             return u32::MAX;
         }
         return tuple_slot_id;
+    }
+    pub fn get_tx_id(&self) -> TxID {
+        unimplemented!()
+    }
+    pub fn get_begin_commit_id(&self) -> Oid {
+        unimplemented!()
+    }
+    pub fn get_end_commit_id(&self) -> Oid {
+        unimplemented!()
     }
 }
 pub struct LogicalTile {

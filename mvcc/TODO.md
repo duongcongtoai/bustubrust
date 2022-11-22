@@ -15,6 +15,13 @@
 - the main point is see how the benchmark works
 
 ### In the middle of some detail
+- tx_manager.perform_insert
 - tile_group.get_header
 - rethink how this header is constructed (from a casted memory region or
   what)
+  This method cast some value at specific memory region, TODO: reason
+  its correctness 
+  inline void SetTransactionId(const oid_t &tuple_slot_id,
+                               const txn_id_t &transaction_id) const {
+    *((txn_id_t *)(TUPLE_HEADER_LOCATION)) = transaction_id;
+  }

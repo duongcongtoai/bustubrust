@@ -62,6 +62,8 @@ impl Tx {
 pub type Oid = u32;
 pub type CID = u64;
 pub const INVALID_OID: u32 = u32::MAX;
+pub const INVALID_TXN_ID: u64 = 0;
+pub const MAX_CID: CID = CID::MAX;
 
 #[derive(Copy, Clone)]
 pub struct ItemPointer {

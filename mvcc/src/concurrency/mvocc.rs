@@ -2,7 +2,7 @@ use dashmap::DashMap;
 
 use crate::{
     storage::catalog,
-    types::{ItemPointer, Oid, Tx, Visibility},
+    types::{ItemPointer, Oid, Tx, Visibility, INVALID_OID, INVALID_TXN_ID, MAX_CID},
     TxManager,
 };
 
@@ -98,8 +98,15 @@ impl TxManager for MvOcc {
         let tile_group_id = location.block;
         let tuple_id = location.offset;
         let tile_group = catalog::get_tile_group(tile_group_id);
-        let tile_group_header = tile_group.header;
+        let tile_group_header = tile_group.get_header();
         let tx_id = tx.id;
+
+        assert_eq!(INVALID_TXN_ID, tile_group_header.borrow().get_tx_id());
+        assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
+        assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
+
+        tile_group_header.set_transaction_id(tuple_id, tx_id);
+
         /* assert(tile_group_header->GetTransactionId(tuple_id) == INVALID_TXN_ID);
         assert(tile_group_header->GetBeginCommitId(tuple_id) == MAX_CID);
         assert(tile_group_header->GetEndCommitId(tuple_id) == MAX_CID); */
