@@ -161,6 +161,15 @@ impl TileGroupHeader {
         }
         return tuple_slot_id;
     }
+    pub fn set_tx_id(&self, tuple_id: Oid, txid: TxID) {
+        let a = unsafe {
+            self.data
+                .offset(tuple_id as isize * HEADER_ENTRY_SIZE as isize)
+        };
+        unsafe {
+            *(a as *const TxID) = txid;
+        }
+    }
     pub fn get_tx_id(&self) -> TxID {
         unimplemented!()
     }
