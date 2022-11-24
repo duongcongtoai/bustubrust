@@ -6,6 +6,7 @@ use crate::{
     TxManager,
 };
 
+/// This is Rust translation of optimistic_txn_manager.cpp from Peloton project
 pub struct MvOcc {
     a: DashMap<String, String>,
 }
@@ -105,28 +106,8 @@ impl TxManager for MvOcc {
         assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
         assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
 
-        tile_group_header.set_transaction_id(tuple_id, tx_id);
-
-        /* assert(tile_group_header->GetTransactionId(tuple_id) == INVALID_TXN_ID);
-        assert(tile_group_header->GetBeginCommitId(tuple_id) == MAX_CID);
-        assert(tile_group_header->GetEndCommitId(tuple_id) == MAX_CID); */
-
-        /* LOG_TRACE("PerformInsert (%u, %u)\n", location.block, location.offset);
-
-
-        tile_group_header->SetTransactionId(tuple_id, transaction_id);
-        // no need to set next item pointer.
-
-        // Add the new tuple into the insert set
-        current_txn->RecordInsert(location);
-
-        // Init the tuple reserved field
-        InitTupleReserved(tile_group_header, tuple_id);
-
-        // Write down the head pointer's address in tile group header
-        SetHeadPtr(tile_group_header, tuple_id, itemptr_ptr);
-
-        return true; */
+        tile_group_header.borrow().set_tx_id(tuple_id, tx_id);
+        tx.record_insert(location);
     }
 
     fn perform_update(

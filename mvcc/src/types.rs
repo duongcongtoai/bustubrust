@@ -55,6 +55,9 @@ pub struct Tx {
 }
 
 impl Tx {
+    pub fn record_insert(&self, location: ItemPointer) {
+        !unimplemented!()
+    }
     pub fn record_update(&self, location: ItemPointer) {
         !unimplemented!()
     }

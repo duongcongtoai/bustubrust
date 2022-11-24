@@ -1,5 +1,5 @@
 ## General 
-- Exercise in CMU 15-445 course but written in Rust
+- A project to learn how to build a RDBMS from scratch.
 
 Exercises
 ### Query execution
@@ -12,8 +12,14 @@ Exercises
 - [ ] Aggregation
 - [ ] Limit
 - [ ] Distinct
+### MVCC implementations
+- [ ] MVOCC
+- [ ] MV2PL
+- [ ] SSI
+### Garbage collecting
+### ARIES recovery
 ## Credit 
-- Some code was copied from https://github.com/erikgrinaker/toydb
+- https://github.com/cmu-db/peloton
 
 ## Things to investigate:
 - Column family
