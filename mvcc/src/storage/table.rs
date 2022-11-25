@@ -26,6 +26,9 @@ pub struct DataTable {
 }
 
 impl DataTable {
+    pub fn get_schema(&self) -> Schema {
+        self.schema.clone()
+    }
     pub fn insert_tuple(&self, tuple: Tuple) -> ItemPointer {
         self.fill_in_empty_tuple_slot(tuple)
         // TODO: insert index, check fk ...

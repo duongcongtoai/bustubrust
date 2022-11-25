@@ -10,18 +10,15 @@
 - implemented populate_table without tx_manager.perform_insert
 ### Next steps:
 - insert_executor
-- txmanager.perform_insert
-- executor_test_util.cpp also uses this method, maybe trying that
 - the main point is see how the benchmark works
 
 ### In the middle of some detail
-- tx_manager.perform_insert
-- tile_group.get_header
-- rethink how this header is constructed (from a casted memory region or
-  what)
-  This method cast some value at specific memory region, TODO: reason
-  its correctness 
-  inline void SetTransactionId(const oid_t &tuple_slot_id,
-                               const txn_id_t &transaction_id) const {
-    *((txn_id_t *)(TUPLE_HEADER_LOCATION)) = transaction_id;
-  }
+- insert_executor
+- node.GetTuple what is this -> find other usage
+- node.GetProjectInfo ?
+ has a targetlist, which is a vector of <oid,expression>
+ one usage shows oid is col_id, expression can be a constant value
+- What does RB stands for -> Stands for Rollback, but why is it a type
+  of concurrency protocol???
+
+

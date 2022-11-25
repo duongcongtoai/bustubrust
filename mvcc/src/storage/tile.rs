@@ -142,6 +142,7 @@ static HEADER_ENTRY_SIZE: usize = size_of::<TxID>()
     + RESERVED_SIZE
     + 2 * size_of::<bool>();
 
+/// TODO: this is completely not thread safe
 impl TileGroupHeader {
     // pub fn set_transaction_id()
     fn new(storage: &StorageManager, tuple_count: usize) -> Self {
