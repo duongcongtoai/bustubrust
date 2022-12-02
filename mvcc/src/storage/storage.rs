@@ -8,26 +8,29 @@ use super::tuple::Value;
 pub struct ContainerTuple {}
 
 pub struct ProjectInfo {
-    target_list: Vec<Target>,
+    pub target_list: Vec<Target>,
 }
-impl ProjectInfo {
+impl Target {
     pub fn evaluate_inplace(&self, dest: ContainerTuple) -> bool {
         false
     }
-    pub fn evaluate_single(&self, dest: ContainerTuple, t1: ContainerTuple) -> bool {
-        false
+    pub fn const_evaluate(&self) -> Value {
+        unimplemented!()
+    }
+    pub fn evaluate_single(&self, dest: ContainerTuple, t1: ContainerTuple) -> Value {
+        unimplemented!()
     }
     fn evaluate_double(
         &self,
         dest: ContainerTuple,
         t1: ContainerTuple,
         t2: ContainerTuple,
-    ) -> bool {
-        false
+    ) -> Value {
+        unimplemented!()
     }
 }
 pub struct Target {
-    col_id: Oid,
+    pub col_id: Oid,
     expr: Expression,
 }
 

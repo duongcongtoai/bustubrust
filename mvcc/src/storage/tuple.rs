@@ -11,6 +11,9 @@ pub struct BorrowedTuple<'a> {
     data: &'a mut [u8],
     schema: Schema,
 }
+
+/// There are two types of tuple, tuple allocated from a memory region somewhere else and tuple
+/// allocated on demand.
 impl<'a> BorrowedTuple<'a> {
     pub fn new(schema: &Schema, data: &'a mut [u8]) -> Self {
         // todo: peloton round this number to be divisible by 4 somehow

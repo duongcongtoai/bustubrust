@@ -2,7 +2,7 @@ use dashmap::DashMap;
 
 use crate::{
     storage::catalog,
-    types::{ItemPointer, Oid, Tx, Visibility, INVALID_OID, INVALID_TXN_ID, MAX_CID},
+    types::{ItemPointer, Oid, Tx, Visibility, INVALID_TXN_ID, MAX_CID},
     TxManager,
 };
 
