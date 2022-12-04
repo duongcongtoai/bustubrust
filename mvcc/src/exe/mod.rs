@@ -6,6 +6,6 @@ pub mod update;
 
 /// TODO: still a dummy trait
 pub trait Executor {
-    fn execute();
-    fn get_output() -> LogicalTile;
+    fn execute(&self);
+    fn get_output(&self) -> LogicalTile;
 }

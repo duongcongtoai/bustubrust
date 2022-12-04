@@ -182,14 +182,48 @@ impl TileGroupHeader {
     }
 }
 
+/// Mapping between a logical tuple id and physical tuple location of that value in the physical tile
+pub type PositionList = Vec<Oid>;
+
 pub struct LogicalTile {
-    position_lists: Vec<Vec<Oid>>,
+    position_lists: Vec<PositionList>,
+    // position_lists_v2: HashMap<Oid, Vec<Oid>>,
 }
+pub struct LogicalCol {
+    physical_col_id: Oid,
+    physical_tile: Rc<RefCell<Tile>>,
+}
+/// 1 col in logical tile maps to 1 col in physical tile, not 1-n described on Peloton's wiki
 impl LogicalTile {
     fn new() -> Self {
         LogicalTile {
             position_lists: vec![],
         }
+    }
+
+    pub fn get_value(&self, tuple_id: Oid, col_id: Oid) -> Value {
+        unimplemented!()
+    }
+}
+pub struct LogicalTileIter {}
+
+impl IntoIterator for LogicalTile {
+    type Item = Oid;
+
+    type IntoIter = LogicalTileIter;
+
+    fn into_iter(self) -> Self::IntoIter {
+        unimplemented!()
+    }
+}
+
+impl Iterator for LogicalTileIter {
+    type Item = Oid;
+
+    // type IntoIter: Iterator<Item = Self::Item>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        unimplemented!()
     }
 }
 

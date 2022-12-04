@@ -36,3 +36,8 @@ Value LogicalTile::GetValue(oid_t tuple_id, oid_t column_id) {
 }
 
 
+- I need to read paper about tile group: Logical tile vs physical tile
+ColumnInfo is actually LogicalColumn:
+- original_col_id: the col_id inside the physical
+1 col in logical tile -> 1 col in physical tile, not n in physical tile
+described on peloton's wiki
