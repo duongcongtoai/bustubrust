@@ -9,35 +9,16 @@
   InsertExecutor in insert.rs file
 - implemented populate_table without tx_manager.perform_insert
 ### Next steps:
-- insert_executor
 - the main point is see how the benchmark works
+- impl ExecutorTestsUtil::PopulatedValue(old_tuple_id, 1);
+- impl seq_scan
+- impl test for seq_scan
+- impl test for tile/tile_group
+- impl test for insert_executor
 
 ### In the middle of some detail
-- insert_executor, case node plan is a children executor
-- differentiate between different types of tuple :
-  ContainerTuple<LogicalTile>
-  storage::Tuple
-Value LogicalTile::GetValue(oid_t tuple_id, oid_t column_id) {
-  PL_ASSERT(column_id < schema_.size());
-  PL_ASSERT(tuple_id < total_tuples_);
-  PL_ASSERT(visible_rows_[tuple_id]);
-
-  ColumnInfo &cp = schema_[column_id];
-  oid_t base_tuple_id = position_lists_[cp.position_list_idx][tuple_id];
-  storage::Tile *base_tile = cp.base_tile.get();
-
-  LOG_TRACE("Tuple : %u Column : %u", base_tuple_id, cp.origin_column_id);
-  if (base_tuple_id == NULL_OID) {
-    return ValueFactory::GetNullValueByType(
-        base_tile->GetSchema()->GetType(column_id));
-  } else {
-    return base_tile->GetValue(base_tuple_id, cp.origin_column_id);
-  }
-}
+- revisit NSM/DSM/FSM/PAX is a must now
+- implemented populate_table without tx_manager.perform_insert
+- 
 
 
-- I need to read paper about tile group: Logical tile vs physical tile
-ColumnInfo is actually LogicalColumn:
-- original_col_id: the col_id inside the physical
-1 col in logical tile -> 1 col in physical tile, not n in physical tile
-described on peloton's wiki
