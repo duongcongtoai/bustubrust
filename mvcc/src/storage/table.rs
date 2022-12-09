@@ -1,4 +1,5 @@
 use std::{
+    borrow::Borrow,
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
@@ -26,6 +27,11 @@ pub struct DataTable {
 }
 
 impl DataTable {
+    pub fn tile_group_iter(&self) {
+        for (_, item) in self.tile_groups {
+            let tilegroup = item;
+        }
+    }
     pub fn get_schema(&self) -> Schema {
         self.schema.clone()
     }
@@ -58,7 +64,7 @@ impl DataTable {
     /// allocate a new tilegroup  
     /// remmeber to update last_tile_group, vector of tilegroup
     pub fn add_default_tile_group(&self) -> Oid {
-        let tile_group = self.get_tilegroup_from_layout_column();
+        let tile_group = self.create_tilegroup_from_column_layout();
         let tile_group_id = tile_group.borrow().get_tile_group_id();
         // TODO: is Relaxed safe here?
         self.last_tile_group.store(tile_group_id, Ordering::Relaxed);
@@ -73,7 +79,7 @@ impl DataTable {
     /// originally have ROW, COLUMN and HYBRID
     /// only support column layout now
     /// each sub schema is only has 1 column
-    pub fn get_tilegroup_from_layout_column(&self) -> Rc<RefCell<TileGroup>> {
+    pub fn create_tilegroup_from_column_layout(&self) -> Rc<RefCell<TileGroup>> {
         let mut schemas = vec![];
 
         for i in 0..self.schema.get_column_count() as Oid {
