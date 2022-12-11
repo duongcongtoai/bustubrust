@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::HashMap};
+
 use crossbeam_channel::Receiver;
 
 // a variation of MV2PL, 2V2PL
@@ -52,9 +54,35 @@ pub struct Tx {
     dep_result_receiver: Receiver<(TxID, DepCode)>,
     // where i get my dependent
     dep_registrations: Receiver<TxID>,
+    rw_sets: RefCell<HashMap<Oid, HashMap<Oid, RWType>>>,
+}
+#[derive(Debug)]
+pub enum RWType {
+    Read,
+    Update,
+    Insert,
+    Delete,
+    InsDelete, // delete after insert
 }
 
 impl Tx {
+    pub fn record_read(&self, location: ItemPointer) {
+        let tg_id = location.block;
+        let tuple_id = location.offset;
+        if let Some(tg_rw_set) = self.rw_sets.borrow_mut().get_mut(&tg_id) {
+            if let Some(rw_val) = tg_rw_set.get(&tuple_id) {
+                // if tuple is deleted, it should not be visible in the first place
+                assert!(!matches!(RWType::Delete, rw_val));
+                assert!(!matches!(RWType::InsDelete, rw_val));
+            } else {
+                tg_rw_set.insert(tuple_id, RWType::Read);
+            }
+        } else {
+            let mut new_rw_set = HashMap::new();
+            new_rw_set.insert(tuple_id, RWType::Read);
+            self.rw_sets.borrow_mut().insert(tg_id, new_rw_set);
+        }
+    }
     pub fn record_insert(&self, location: ItemPointer) {
         !unimplemented!()
     }

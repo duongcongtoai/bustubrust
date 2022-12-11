@@ -92,7 +92,7 @@ impl TxManager for MvOcc {
     }
 
     fn perform_read(tx: &Tx, location: ItemPointer) {
-        todo!()
+        tx.record_read(location);
     }
 
     fn perform_insert(tx: &Tx, location: ItemPointer) {
