@@ -24,6 +24,10 @@ Deeply understands how query executor works including:
 - impl test for insert_executor
 
 ### In the middle of some detail
+- operator does not look threadsafe at all, in the original paper 2011
+  of MVOCC inspired from Hekaton, there are CAS operation, but this impl
+  of Peloton does not have anything similar, need to investigate if this
+  is truely safe
 - revisit NSM/DSM/FSM/PAX is a must now
 - implemented populate_table without tx_manager.perform_insert
 - what is the procesing method used by Peloton (iterator/materialization/Vectorized)
