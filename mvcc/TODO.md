@@ -28,6 +28,7 @@ Deeply understands how query executor works including:
   of MVOCC inspired from Hekaton, there are CAS operation, but this impl
   of Peloton does not have anything similar, need to investigate if this
   is truely safe
+- need to read paper MVOCC 2011 again and summary into wiki on github
 - revisit NSM/DSM/FSM/PAX is a must now
 - implemented populate_table without tx_manager.perform_insert
 - what is the procesing method used by Peloton (iterator/materialization/Vectorized)
