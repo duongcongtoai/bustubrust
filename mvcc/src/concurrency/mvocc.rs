@@ -1,8 +1,9 @@
 use dashmap::DashMap;
+use lazy_static::lazy_static;
 
 use crate::{
-    storage::catalog,
-    types::{ItemPointer, Oid, Tx, Visibility, INVALID_TXN_ID, MAX_CID},
+    storage::{catalog, tile::TileGroupHeader},
+    types::{ItemPointer, Oid, Tx, TxPhase, Visibility, CID, INVALID_TXN_ID, MAX_CID},
     TxManager,
 };
 
@@ -10,69 +11,134 @@ use crate::{
 pub struct MvOcc {
     a: DashMap<String, String>,
 }
+lazy_static! {
+    // key is tx_id, value is state of tx as well as its ts (begin or commit ts,depends on state)
+    static ref TX_STATE : DashMap<CID,(TxPhase,CID)> = {
+        let mut m = DashMap::new();
+        m
+    };
+}
 
-impl TxManager for MvOcc {
-    fn is_visible(tx: &Tx, tuple_id: Oid) -> Visibility {
-        unimplemented!()
-        /*
-        txn_id_t tuple_txn_id = tile_group_header->GetTransactionId(tuple_id);
-        cid_t tuple_begin_cid = tile_group_header->GetBeginCommitId(tuple_id);
-        cid_t tuple_end_cid = tile_group_header->GetEndCommitId(tuple_id);
+pub fn is_ts(id: CID) -> bool {
+    id.leading_zeros() > 0
+}
 
-        bool own = (current_txn->GetTransactionId() == tuple_txn_id);
-        bool activated = (current_txn->GetBeginCommitId() >= tuple_begin_cid);
-        bool invalidated = (current_txn->GetBeginCommitId() >= tuple_end_cid);
-
-        if (tuple_txn_id == INVALID_TXN_ID) {
-          // the tuple is not available.
-          if (activated && !invalidated) {
-            // deleted tuple
-            return VISIBILITY_DELETED;
-          } else {
-            // aborted tuple
-            return VISIBILITY_INVISIBLE;
-          }
+impl MvOcc {
+    fn _extract_tuple_end_ts(
+        tx: &Tx,
+        read_ts: CID,
+        tuple_id: Oid,
+        tgh: &TileGroupHeader,
+    ) -> (CID, Visibility, bool) {
+        let t_end_ts = tgh.get_tuple_begin_ts(tuple_id);
+        let mut visible = false;
+        let mut speculative_result = false;
+        let mut return_cid = 0;
+        if is_ts(t_end_ts) {
+            visible = read_ts < t_end_ts;
+            return_cid = t_end_ts;
+        } else {
+            let owning_tx_id = t_end_ts & u64::MAX >> 1;
+            let (tx_state, tx_ts) = *TX_STATE.get(&owning_tx_id).unwrap();
+            return_cid = tx_ts;
+            match tx_state {
+                Processing => {
+                    // other txn is attempting to delete this version, but not committed
+                    if tx.id != owning_tx_id {
+                        return_cid = 0;
+                        visible = true;
+                    }
+                    // most likely this version is created, and later on deleted within the same txn
+                    visible = false
+                }
+                Preparing => {
+                    // even if this tx abort, future txn removing this tuple will always happen
+                    // after read_ts
+                    if read_ts < tx_ts {
+                        visible = true
+                    }
+                    // speculative ignore, tx must commit for this result to be consistent
+                    speculative_result = true;
+                    visible = false;
+                }
+                Committed => {
+                    visible = read_ts < tx_ts;
+                }
+                Aborted => {
+                    visible = true;
+                    return_cid = 0;
+                }
+            }
+        }
+        if visible {
+            return (return_cid, Visibility::Visible, speculative_result);
         }
 
-        // there are exactly two versions that can be owned by a transaction.
-        // unless it is an insertion.
-        if (own == true) {
-          if (tuple_begin_cid == MAX_CID && tuple_end_cid != INVALID_CID) {
-            assert(tuple_end_cid == MAX_CID);
-            // the only version that is visible is the newly inserted/updated one.
-            return VISIBILITY_OK;
-          } else if (tuple_end_cid == INVALID_CID) {
-            // tuple being deleted by current txn
-            return VISIBILITY_DELETED;
-          } else {
-            // old version of the tuple that is being updated by current txn
-            return VISIBILITY_INVISIBLE;
-          }
+        return (return_cid, Visibility::Deleted, speculative_result);
+    }
+    // return (lower bound ts, whether this ts is visible, whether it is speculative read)
+    fn _extract_tuple_begin_ts(
+        tx: &Tx,
+        read_ts: CID,
+        tuple_id: Oid,
+        tgh: &TileGroupHeader,
+    ) -> (CID, Visibility, bool) {
+        let return_cid = 0;
+        let t_bgin_ts = tgh.get_tuple_begin_ts(tuple_id);
+        let mut speculative_result = false;
+        let mut visible = false;
+        if is_ts(t_bgin_ts) {
+            visible = read_ts > t_bgin_ts;
+            return_cid = t_bgin_ts;
         } else {
-          if (tuple_txn_id != INITIAL_TXN_ID) {
-            // if the tuple is owned by other transactions.
-            if (tuple_begin_cid == MAX_CID) {
-              // in this protocol, we do not allow cascading abort. so never read an
-              // uncommitted version.
-              return VISIBILITY_INVISIBLE;
-            } else {
-              // the older version may be visible.
-              if (activated && !invalidated) {
-                return VISIBILITY_OK;
-              } else {
-                return VISIBILITY_INVISIBLE;
-              }
+            let owning_tx_id = t_bgin_ts & u64::MAX >> 1;
+            let (tx_state, tx_ts) = *TX_STATE.get(&owning_tx_id).unwrap();
+            return_cid = tx_ts;
+            match tx_state {
+                Processing => {
+                    // tx_ts is begin ts
+                    visible = read_ts > tx_ts && tx.id == owning_tx_id;
+                }
+                Preparing => {
+                    visible = read_ts > tx_ts;
+                    speculative_result = true;
+                }
+                Committed => {
+                    visible = read_ts > tx_ts;
+                }
+                Aborted => {
+                    return_cid = 0;
+                    visible = false;
+                }
             }
-          } else {
-            // if the tuple is not owned by any transaction.
-            if (activated && !invalidated) {
+        }
+        if visible {
+            return (return_cid, Visibility::Visible, speculative_result);
+        }
+        return (return_cid, Visibility::Invisible, speculative_result);
+    }
+}
 
-              return VISIBILITY_OK;
-            } else {
-              return VISIBILITY_INVISIBLE;
-            }
-          }
-        } */
+impl TxManager for MvOcc {
+    fn is_visible(tx: &Tx, tuple_id: Oid, tgh: &TileGroupHeader) -> Visibility {
+        // determine read time == tx's time or current time
+        //
+        // TODO: determine this read ts
+        let read_ts = 0;
+        let t_bgin_ts = tgh.get_tuple_begin_ts(tuple_id);
+        let (_, begin_ts_visible, speculative_read) =
+            MvOcc::_extract_tuple_begin_ts(tx, read_ts, tuple_id, tgh);
+        let (_, end_ts_visible, speculative_ignore) =
+            MvOcc::_extract_tuple_end_ts(tx, read_ts, tuple_id, tgh);
+        match begin_ts_visible {
+            Visibility => match end_ts_visible {
+                Visibility => return Visibility::Visible,
+                Deleted => return Visibility::Deleted,
+                _ => panic!("end_ts_visibility cannot has result 'invisible'"),
+            },
+            Invisible => return Visibility::Invisible,
+            _ => panic!("begin_ts_visibility cannot has result 'deleted'"),
+        }
     }
 
     fn is_owner(tx: &Tx, tuple_id: Oid) -> bool {

@@ -31,6 +31,6 @@ Deeply understands how query executor works including:
 - need to read paper MVOCC 2011 again and summary into wiki on github
 - revisit NSM/DSM/FSM/PAX is a must now
 - implemented populate_table without tx_manager.perform_insert
-- what is the procesing method used by Peloton (iterator/materialization/Vectorized)
+- implementing seqscan, in the middle between is_visible and commit_tx.
 
 

@@ -1,3 +1,4 @@
+use storage::tile::TileGroupHeader;
 use types::{ItemPointer, Oid, Tx, Visibility};
 
 // pub mod commit; this is a playground lib, do not used
@@ -12,7 +13,7 @@ pub trait TxManager {
     // check whether a tuple is visible to current transaction.
     // in this protocol, we require that a transaction cannot see other
     // transaction's local copy.
-    fn is_visible(tx: &Tx, tuple_id: Oid) -> Visibility;
+    fn is_visible(tx: &Tx, tuple_id: Oid, tgh: &TileGroupHeader) -> Visibility;
 
     // check whether the current transaction owns the tuple.
     // this function is called by update/delete executors.

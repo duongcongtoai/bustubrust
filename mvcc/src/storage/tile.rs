@@ -144,6 +144,12 @@ static HEADER_ENTRY_SIZE: usize = size_of::<TxID>()
 
 /// TODO: this is completely not thread safe
 impl TileGroupHeader {
+    pub fn get_tuple_begin_ts(&self, tx_id: Oid) -> CID {
+        unimplemented!()
+    }
+    pub fn get_tuple_end_ts(&self, tx_id: Oid) -> CID {
+        unimplemented!()
+    }
     // pub fn set_transaction_id()
     fn new(storage: &StorageManager, tuple_count: usize) -> Self {
         let header_size = tuple_count * HEADER_ENTRY_SIZE;

@@ -38,6 +38,7 @@ pub enum DepCode {
 }
 
 pub type TxID = u64;
+#[derive(Debug)]
 pub enum TxPhase {
     Processing,
     Preparing,

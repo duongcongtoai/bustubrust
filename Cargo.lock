@@ -1013,6 +1013,7 @@ dependencies = [
  "crossbeam-channel",
  "crossbeam-utils",
  "dashmap 5.4.0",
+ "lazy_static",
  "libc",
  "log",
  "object-pool",
