@@ -128,16 +128,17 @@ impl TxManager for MvOcc {
         let t_bgin_ts = tgh.get_tuple_begin_ts(tuple_id);
         let (_, begin_ts_visible, speculative_read) =
             MvOcc::_extract_tuple_begin_ts(tx, read_ts, tuple_id, tgh);
+        match begin_ts_visible {
+            Invisible => return Visibility::Invisible,
+            Deleted => panic!("begin_ts_visibility cannot has result 'deleted'"),
+            _ => {}
+        }
         let (_, end_ts_visible, speculative_ignore) =
             MvOcc::_extract_tuple_end_ts(tx, read_ts, tuple_id, tgh);
-        match begin_ts_visible {
-            Visibility => match end_ts_visible {
-                Visibility => return Visibility::Visible,
-                Deleted => return Visibility::Deleted,
-                _ => panic!("end_ts_visibility cannot has result 'invisible'"),
-            },
-            Invisible => return Visibility::Invisible,
-            _ => panic!("begin_ts_visibility cannot has result 'deleted'"),
+        match end_ts_visible {
+            Visibility => return Visibility::Visible,
+            Deleted => return Visibility::Deleted,
+            _ => panic!("end_ts_visibility cannot has result 'invisible'"),
         }
     }
 
@@ -161,6 +162,7 @@ impl TxManager for MvOcc {
         tx.record_read(location);
     }
 
+    /// install its tx_id into the location, if fails, we must abort
     fn perform_insert(tx: &Tx, location: ItemPointer) {
         let tile_group_id = location.block;
         let tuple_id = location.offset;
@@ -168,11 +170,16 @@ impl TxManager for MvOcc {
         let tile_group_header = tile_group.get_header();
         let tx_id = tx.id;
 
-        assert_eq!(INVALID_TXN_ID, tile_group_header.borrow().get_tx_id());
-        assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
-        assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
+        // assert_eq!(INVALID_TXN_ID, tile_group_header.borrow().get_tx_id());
+        /* assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id());
+        assert_eq!(MAX_CID, tile_group_header.borrow().get_tx_id()); */
 
-        tile_group_header.borrow().set_tx_id(tuple_id, tx_id);
+        let success = tile_group_header
+            .borrow()
+            .install_owning_tx(tuple_id, tx_id);
+        if !success {
+            panic!("todo")
+        }
         tx.record_insert(location);
     }
 

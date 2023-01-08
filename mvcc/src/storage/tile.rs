@@ -131,16 +131,14 @@ pub struct TileGroupHeader {
 }
 
 static RESERVED_SIZE: usize = 28;
+// Not sure if we need anything else, a prototype only, still
 // *  -----------------------------------------------------------------------------
-// *  | TxnID (8 bytes)  | BeginTimeStamp (8 bytes) | EndTimeStamp (8 bytes) | Master Pointer (8 Bytes)
-// *  | NextItemPointer (8 bytes) | PrevItemPointer (8 bytes) |
-// *  | ReservedField (24 bytes) | InsertCommit (1 byte) | DeleteCommit (1 byte)
+// *  | BeginTimeStamp (8 bytes) | EndTimeStamp (8 bytes)
+// *  | NextItemPointer (8 bytes)
+// *
 // *  -----------------------------------------------------------------------------
-static HEADER_ENTRY_SIZE: usize = size_of::<TxID>()
-    + 2 * size_of::<CID>()
-    + 3 * size_of::<ItemPointer>()
-    + RESERVED_SIZE
-    + 2 * size_of::<bool>();
+static HEADER_ENTRY_SIZE: usize =
+    size_of::<TxID>() + 2 * size_of::<CID>() + 1 * size_of::<ItemPointer>();
 
 /// TODO: this is completely not thread safe
 impl TileGroupHeader {
@@ -168,18 +166,18 @@ impl TileGroupHeader {
         }
         return tuple_slot_id;
     }
-    pub fn set_tx_id(&self, tuple_id: Oid, txid: TxID) {
-        let a = unsafe {
+    pub fn install_owning_tx(&self, tuple_id: Oid, txid: TxID) -> bool {
+        let entry_p = unsafe {
             self.data
                 .offset(tuple_id as isize * HEADER_ENTRY_SIZE as isize)
         };
         unsafe {
-            *(a as *const TxID) = txid;
+            *(entry_p as *const TxID) = txid;
         }
     }
-    pub fn get_tx_id(&self) -> TxID {
+    /* pub fn get_tx_id(&self) -> TxID {
         unimplemented!()
-    }
+    } */
     pub fn get_begin_commit_id(&self) -> Oid {
         unimplemented!()
     }
