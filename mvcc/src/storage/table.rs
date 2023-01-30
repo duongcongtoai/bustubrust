@@ -3,7 +3,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
-    sync::atomic::{AtomicU32, Ordering},
+    sync::atomic::{AtomicPtr, AtomicU32, Ordering},
 };
 
 use dashmap::DashMap;
@@ -35,9 +35,13 @@ impl DataTable {
     pub fn get_schema(&self) -> Schema {
         self.schema.clone()
     }
-    pub fn insert_tuple(&self, tuple: Tuple) -> ItemPointer {
+    // insert into storage, if it is in-mem storage, take the raw data addr and insert it into
+    // index, return the raw pointer of that address (*mut ItemPointer)
+    pub fn insert_tuple(&self, tuple: Tuple) -> (ItemPointer, AtomicPtr<ItemPointer>) {
         self.fill_in_empty_tuple_slot(tuple)
-        // TODO: insert index, check fk ...
+        // TODO: insert index, before doing that, allocate a new ItemPointer obj, this obj will be
+        // shared (threadsafely) in places like index/master_ptr for case newest to oldest
+        // operation, check fk ...
     }
 
     pub fn fill_in_empty_tuple_slot(&self, tuple: Tuple) -> ItemPointer {

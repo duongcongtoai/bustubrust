@@ -163,7 +163,12 @@ impl TxManager for MvOcc {
     }
 
     /// install its tx_id into the location, if fails, we must abort
-    fn perform_insert(tx: &Tx, location: ItemPointer) {
+    /// also, set headptr = index_addr in the header of this tuple
+    /// the head ptr is useful when we update a tuple, we allocate another addr to store the new
+    /// value of a given tuple, and we want to set the head ptr to this new location, we can do
+    /// this if we share a ptr to the value of this addr (which can also shared in the index as
+    /// well)
+    fn perform_insert_with_index_ptr(tx: &Tx, location: ItemPointer, index_addr: &mut ItemPointer) {
         let tile_group_id = location.block;
         let tuple_id = location.offset;
         let tile_group = catalog::get_tile_group(tile_group_id);

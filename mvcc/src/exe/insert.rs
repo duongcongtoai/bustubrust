@@ -41,7 +41,7 @@ where
                     panic!("tx failed")
                 }
                 // mvcc part
-                T::perform_insert(tx, loc);
+                T::perform_insert_with_index_ptr(tx, loc);
             }
 
             return false;

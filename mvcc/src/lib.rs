@@ -37,7 +37,9 @@ pub trait TxManager {
     fn yield_ownership(tx: &Tx, tuple_id: Oid);
 
     fn perform_read(tx: &Tx, location: ItemPointer);
+
     fn perform_insert(tx: &Tx, location: ItemPointer);
+    fn perform_insert_with_index_ptr(tx: &Tx, location: ItemPointer, index_addr: &mut ItemPointer);
     fn perform_update(
         tx: &Tx,
         old_location: ItemPointer,
